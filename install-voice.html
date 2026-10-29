@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>ChipAgents Web - Voice Add-on</title>
+<style>
+  body { font-family: Segoe UI, Arial, sans-serif; background: #1c1b19; color: #eceae6; max-width: 820px; margin: 40px auto; font-size: 110%; line-height: 1.5; padding: 0 16px; }
+  h1 { font-size: 24px; }
+  .bm { display: inline-block; padding: 10px 18px; background: #2f6fde; color: #fff; border-radius: 8px; text-decoration: none; font-weight: 600; cursor: grab; }
+  code, kbd { background: #2c2a27; padding: 1px 6px; border-radius: 4px; }
+  .note { background: #2c2a27; border-left: 3px solid #e0a030; padding: 8px 12px; margin: 16px 0; }
+  button { padding: 6px 12px; border-radius: 6px; border: 1px solid #555; background: #2c2a27; color: #eceae6; cursor: pointer; }
+  table { border-collapse: collapse; }
+  td { padding: 3px 12px 3px 0; }
+</style>
+</head>
+<body>
+<h1>ChipAgents Web &ndash; Voice Add-on</h1>
+<p><b>Install (one time, Edge or Chrome):</b></p>
+<ol>
+  <li>Show the favorites/bookmarks bar: <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>B</kbd></li>
+  <li>Drag this button onto the bar: <a class="bm" id="bm" href="#">🎙 ChipAgents Voice</a></li>
+  <li>If dragging doesn't work: <button id="copy">Copy bookmark code</button>, add a new favorite, and paste it into the URL field.</li>
+</ol>
+<p><b>Use:</b> open the hub (<code>http://localhost:4242/hub</code>), then click <b>🎙 ChipAgents Voice</b>. A small voice panel appears at the bottom right. Click the bookmark again to hide or show it. The add-on stays loaded until you reload the page. After a reload, click the bookmark again.</p>
+<table>
+  <tr><td>🎤 / <kbd>Alt</kbd>+<kbd>M</kbd></td><td>Start or stop dictation into the message box. Press Enter to send.</td></tr>
+  <tr><td>🔊 / 🔇</td><td>Turn auto-read of finished replies on or off (saved).</td></tr>
+  <tr><td>▶ / <kbd>Alt</kbd>+<kbd>R</kbd></td><td>Read the last reply aloud.</td></tr>
+  <tr><td>⏹ / <kbd>Alt</kbd>+<kbd>S</kbd></td><td>Stop speaking.</td></tr>
+  <tr><td>A</td><td>Turn larger hub text (110%) on or off (saved, on by default). The header logo is always shown larger.</td></tr>
+</table>
+<div class="note">
+  The first time you use the mic, the browser asks for microphone permission for each port (4242, 4243, …).<br>
+  <b>Voice input</b> uses the browser's speech service, which sends your dictated audio to the browser vendor's cloud (Google or Microsoft).<br>
+  <b>Voice output</b> uses only offline Windows voices (for example, Zira or David), so reply text stays on your PC. Code blocks and tables are skipped when reading.
+</div>
+<script type="text/plain" id="src">
+(function(){
+if(window.__caVoice){window.__caVoice.toggle();return;}
+var SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+var synth=window.speechSynthesis;
+var KEY='ca_voice_autoread';
+var autoRead=localStorage.getItem(KEY)!=='0';
+var ZKEY='ca_voice_zoom';
+var big=localStorage.getItem(ZKEY)!=='0';
+var zst=document.createElement('style');
+var LOGO='.hub-side-brand .hub-side-logo,.hub-side-brand .hub-side-mark{height:32px !important}';
+function applyZoom(){zst.textContent=LOGO+(big?'html,body,#root{height:100%}body{zoom:1.1}.hub-app{height:100% !important}':'');}
+applyZoom();document.head.appendChild(zst);
+var voice=null,rec=null,listening=false,armed=false,lastTa=null,msg='';
+var seen=new WeakSet(),spoken=new WeakSet();
+var setter=Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set;
+var panel=document.createElement('div');
+panel.style.cssText='position:fixed;right:16px;bottom:106px;z-index:2147483647;display:flex;flex-direction:column;gap:4px;padding:6px;border-radius:10px;background:var(--bg-secondary,#262522);border:1px solid var(--border-primary,#444);box-shadow:0 4px 14px rgba(0,0,0,.4);font:13px Segoe UI,Arial,sans-serif;color:var(--fg-primary,#eceae6)';
+var row=document.createElement('div');
+row.style.cssText='display:flex;gap:4px';
+var info=document.createElement('div');
+info.style.cssText='max-width:200px;opacity:.75;text-align:center';
+panel.appendChild(row);panel.appendChild(info);
+function btn(title,fn){var b=document.createElement('button');b.type='button';b.title=title;b.style.cssText='width:38px;height:38px;border-radius:8px;border:1px solid var(--border-primary,#555);background:transparent;color:inherit;font-size:18px;cursor:pointer';b.addEventListener('mousedown',function(e){e.preventDefault();});b.addEventListener('click',fn);row.appendChild(b);return b;}
+var bMic=btn('Dictate (Alt+M)',function(){listening?stopMic():startMic();});
+var bAuto=btn('Auto-read replies',function(){autoRead=!autoRead;localStorage.setItem(KEY,autoRead?'1':'0');if(!autoRead&&synth)synth.cancel();render();});
+var bRead=btn('Read last reply (Alt+R)',readLast);
+var bStop=btn('Stop speaking (Alt+S)',function(){if(synth)synth.cancel();});
+var bZoom=btn('Larger text on/off',function(){big=!big;localStorage.setItem(ZKEY,big?'1':'0');applyZoom();render();});
+var bHide=btn('Hide (click bookmark to show)',toggle);
+bZoom.textContent='A';bRead.textContent='▶';bStop.textContent='⏹';bHide.textContent='✕';
+function render(){bMic.textContent=listening?'⏺':'🎤';bMic.style.background=listening?'#c0392b':'transparent';bAuto.textContent=autoRead?'🔊':'🔇';bZoom.style.background=big?'rgba(47,111,222,.45)':'transparent';info.textContent=msg||(listening?'Listening…':(voice?'':'No offline voice found'));info.style.display=info.textContent?'block':'none';}
+function status(t){msg=t;render();setTimeout(function(){if(msg===t){msg='';render();}},4000);}
+function toggle(){panel.style.display=panel.style.display==='none'?'flex':'none';}
+function pickVoice(){if(!synth)return;var v=synth.getVoices().filter(function(x){return x.localService;});voice=v.find(function(x){return /en-US/i.test(x.lang)&&/Zira|Aria|Jenny|David|Mark/i.test(x.name);})||v.find(function(x){return /^en/i.test(x.lang);})||v[0]||null;render();}
+if(synth){pickVoice();synth.addEventListener('voiceschanged',pickVoice);}
+function msgText(m){var src=m.querySelector('.hub-line-agent')||m;var c=src.cloneNode(true);c.querySelectorAll('pre,.markdown-code-embed').forEach(function(n){n.replaceWith(' Code block omitted. ');});c.querySelectorAll('table,.markdown-table-embed').forEach(function(n){n.replaceWith(' Table omitted. ');});c.querySelectorAll('li,p,h1,h2,h3,h4,h5,h6,br,div').forEach(function(n){n.append(/[.!?:]\s*$/.test(n.textContent)?' ':'. ');});return (c.textContent||'').replace(/\s+/g,' ').trim();}
+function chunks(t){var out=[],cur='';t.split(/(?<=[.!?;:])\s+/).forEach(function(s){while(s.length>220){out.push(s.slice(0,220));s=s.slice(220);}if(cur&&(cur+' '+s).length>220){out.push(cur);cur=s;}else{cur=cur?cur+' '+s:s;}});if(cur)out.push(cur);return out;}
+function speak(text){if(!synth||!text)return;if(!voice){status('No offline voice installed');return;}if(listening)stopMic();synth.cancel();chunks(text).forEach(function(c){var u=new SpeechSynthesisUtterance(c);u.voice=voice;u.lang=voice.lang;u.rate=1.05;synth.speak(u);});}
+function readLast(){var all=document.querySelectorAll('.hub-agent-message');if(!all.length){status('No reply to read');return;}speak(msgText(all[all.length-1]));}
+function target(){if(lastTa&&document.contains(lastTa)&&!lastTa.disabled)return lastTa;return document.querySelector('.hub-steer-textarea:not(:disabled)')||document.querySelector('.hub-new-thread-composer textarea:not(:disabled)')||document.querySelector('textarea:not(:disabled)');}
+function setVal(t,v){setter.call(t,v);t.dispatchEvent(new Event('input',{bubbles:true}));}
+function startMic(){if(!SR){status('Dictation not supported in this browser');return;}var t=target();if(!t){status('No message box found');return;}if(synth)synth.cancel();var base=t.value;if(base&&!/\s$/.test(base))base+=' ';var fin='';rec=new SR();rec.lang='en-US';rec.continuous=true;rec.interimResults=true;rec.onresult=function(e){var interim='';for(var i=e.resultIndex;i<e.results.length;i++){var r=e.results[i];if(r.isFinal)fin+=r[0].transcript;else interim+=r[0].transcript;}var tt=target()||t;setVal(tt,base+fin+interim);};rec.onerror=function(e){status('Mic: '+e.error);};rec.onend=function(){listening=false;rec=null;render();};try{rec.start();listening=true;t.focus();}catch(err){status('Mic: '+err.message);}render();}
+function stopMic(){if(rec)rec.stop();listening=false;render();}
+function isComposer(el){return el&&el.tagName==='TEXTAREA'&&el.closest&&el.closest('.hub-composer-wrapper,.hub-new-thread-composer');}
+document.addEventListener('focusin',function(e){if(e.target.tagName==='TEXTAREA'&&!panel.contains(e.target))lastTa=e.target;},true);
+document.addEventListener('keydown',function(e){if(e.altKey&&!e.ctrlKey&&!e.shiftKey){var k=e.key.toLowerCase();if(k==='m'){e.preventDefault();listening?stopMic():startMic();return;}if(k==='r'){e.preventDefault();readLast();return;}if(k==='s'){e.preventDefault();if(synth)synth.cancel();return;}}if(e.key==='Enter'&&!e.shiftKey&&isComposer(e.target)){armed=true;if(listening)stopMic();}},true);
+document.addEventListener('click',function(e){var b=e.target.closest&&e.target.closest('.hub-steer-send');if(b&&!b.classList.contains('hub-steer-stop')){armed=true;if(listening)stopMic();}},true);
+document.addEventListener('submit',function(){armed=true;if(listening)stopMic();},true);
+function scan(){document.querySelectorAll('.hub-agent-message .hub-line-lifecycle.is-completed').forEach(function(l){var m=l.closest('.hub-agent-message');if(spoken.has(m))return;spoken.add(m);if(armed||seen.has(m)){armed=false;if(autoRead)speak(msgText(m));}});document.querySelectorAll('.hub-agent-message').forEach(function(m){seen.add(m);});}
+var timer=null;
+new MutationObserver(function(){if(timer)return;timer=setTimeout(function(){timer=null;scan();},250);}).observe(document.body,{childList:true,subtree:true,attributes:true,attributeFilter:['class']});
+scan();
+document.documentElement.appendChild(panel);
+render();
+window.__caVoice={toggle:toggle,speak:speak,readLast:readLast};
+})();
+</script>
+<script>
+  var src = document.getElementById("src").textContent.trim();
+  var href = "javascript:" + encodeURIComponent(src + "void 0;");
+  var a = document.getElementById("bm");
+  a.href = href;
+  a.addEventListener("click", function (e) { e.preventDefault(); alert("Drag this button to your favorites bar, then click it while the ChipAgents hub page is open."); });
+  document.getElementById("copy").addEventListener("click", function () {
+    navigator.clipboard.writeText(href).then(function () { alert("Copied. Create a new favorite and paste this into its URL field."); });
+  });
+</script>
+</body>
+</html>
