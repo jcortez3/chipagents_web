@@ -7,6 +7,8 @@ const path = require('path');
 const { spawn, execFile } = require('child_process');
 
 const PASTE_DIR = process.env.PASTE_DIR || '/mnt/c/Users/jcortez3/Desktop/screens';
+const GEN_DIR = process.env.GEN_DIR || path.join(PASTE_DIR, 'generated_images');
+fs.mkdirSync(GEN_DIR, { recursive: true });
 const PROXY_START = parseInt(process.env.PASTE_PROXY_PORT || '4300', 10);
 const HUB_START = process.env.HUB_PORT || '4242';
 const CHIPAGENTS = process.env.CHIPAGENTS_BIN || path.join(process.env.HOME || '', '.local/bin/chipagents');
@@ -21,7 +23,8 @@ const ROOTS_TTL_MS = 10 * 1000;
 const WORKSPACES_JSON = path.join(process.env.HOME || '', '.chipagents', 'workspaces.json');
 const EXTRA_ROOTS = (process.env.PREVIEW_ROOTS || '').split(path.delimiter).filter(Boolean);
 const INJECT_JS = Buffer.concat([
-  Buffer.from(`window.__CA_PASTE_DIR=${JSON.stringify(PASTE_DIR)};\n`),
+  Buffer.from(`window.__CA_GEN_DIR=${JSON.stringify(GEN_DIR)};\n`),
+  Buffer.from(`window.__CA_SVG2IMG=${JSON.stringify(path.join(__dirname, 'svg2img.py'))};\n`),
   fs.readFileSync(path.join(__dirname, 'paste-inject.js')),
 ]);
 const TAG = '<script src="/__paste/inject.js"></script>';
@@ -100,7 +103,7 @@ async function previewRoots() {
     ws = [];
   }
   const roots = [];
-  for (const r of [PASTE_DIR, process.cwd(), ...EXTRA_ROOTS, ...ws]) {
+  for (const r of [PASTE_DIR, GEN_DIR, process.cwd(), ...EXTRA_ROOTS, ...ws]) {
     try {
       const real = await fs.promises.realpath(r);
       if (!roots.includes(real)) roots.push(real);
@@ -271,12 +274,12 @@ function listen(port) {
 
 function openBrowser(url) {
   if (!OPEN_BROWSER) return;
-  execFile('explorer.exe', [url], () => {});
+  execFile('rundll32.exe', ['url.dll,FileProtocolHandler', url], () => {});
 }
 
 (async () => {
   proxyPort = await listen(PROXY_START);
-  console.log(`[paste] proxy listening on 127.0.0.1:${proxyPort}, images -> ${PASTE_DIR}`);
+  console.log(`[paste] proxy listening on 127.0.0.1:${proxyPort}, pasted -> ${PASTE_DIR}, generated -> ${GEN_DIR}`);
   const child = spawn(CHIPAGENTS, ['web'], {
     env: { ...process.env, HUB_PORT: HUB_START },
     stdio: ['inherit', 'pipe', 'inherit'],

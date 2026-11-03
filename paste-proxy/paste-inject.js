@@ -42,7 +42,100 @@
     if (!r.ok || !j.path) throw new Error(j.error || 'HTTP ' + r.status);
     return j.path;
   }
-  window.addEventListener('paste', async (ev) => {
+  function setValue(el, v) {
+    const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+    Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, v);
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+  const ZW = '\u200B';
+  const tray = { box: null, el: null, items: [] };
+  const unsent = () => tray.items.filter((i) => !i.sent);
+  const hasPending = (el) => !!el && el === tray.el && 'value' in el && unsent().length > 0;
+  function keepSendable(el) {
+    if (hasPending(el) && el.value === '') setValue(el, ZW);
+  }
+  function stripZw(el) {
+    if ('value' in el && el.value.includes(ZW)) setValue(el, el.value.split(ZW).join(''));
+  }
+  function attachPending(el) {
+    const items = unsent();
+    if (!items.length) return;
+    const typed = el.value.split(ZW).join('');
+    const marks = items.map((i) => i.marker).join(' ');
+    setValue(el, typed.trim() ? marks + ' ' + typed : marks);
+    for (const i of items) i.sent = true;
+  }
+  function placeTray() {
+    if (!tray.box) return;
+    if (!tray.items.length || !tray.el || !tray.el.isConnected) { tray.box.style.display = 'none'; return; }
+    const r = tray.el.getBoundingClientRect();
+    tray.box.style.display = 'flex';
+    tray.box.style.left = Math.max(4, r.left) + 'px';
+    tray.box.style.bottom = (window.innerHeight - r.top + 6) + 'px';
+  }
+  function dropThumb(item) {
+    URL.revokeObjectURL(item.url);
+    item.node.remove();
+    tray.items = tray.items.filter((i) => i !== item);
+    placeTray();
+  }
+  function syncTray() {
+    if (!tray.items.length) return;
+    const gone = !tray.el || !tray.el.isConnected;
+    const text = gone ? '' : (tray.el.value ?? tray.el.innerText ?? '');
+    for (const item of [...tray.items]) if (gone || (item.sent && !text.includes(item.marker))) dropThumb(item);
+    if (!gone) keepSendable(tray.el);
+    placeTray();
+  }
+  function addThumb(el, file, marker) {
+    if (!tray.box) {
+      tray.box = document.createElement('div');
+      tray.box.setAttribute('data-ca-img-root', '');
+      tray.box.style.cssText = 'position:fixed;z-index:2147483645;display:none;gap:6px;padding:6px;' +
+        'background:rgba(30,30,30,.85);border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,.4);max-width:70vw;overflow-x:auto;';
+      document.body.appendChild(tray.box);
+      window.addEventListener('resize', placeTray);
+      document.addEventListener('scroll', placeTray, true);
+      document.addEventListener('input', syncTray, true);
+      setInterval(syncTray, 700);
+    }
+    const item = { marker, sent: false, url: URL.createObjectURL(file), node: document.createElement('div') };
+    item.node.style.cssText = 'position:relative;flex:0 0 auto;';
+    const img = new Image();
+    img.src = item.url;
+    img.title = marker.slice(15, -1).split('/').pop();
+    img.style.cssText = 'display:block;height:56px;max-width:120px;object-fit:cover;border-radius:4px;background:#fff;';
+    const x = document.createElement('button');
+    x.type = 'button';
+    x.textContent = '\u2715';
+    x.title = 'Remove image';
+    x.style.cssText = 'position:absolute;top:-4px;right:-4px;width:18px;height:18px;padding:0;border:0;' +
+      'border-radius:50%;background:#b3261e;color:#fff;font:11px/18px sans-serif;cursor:pointer;';
+    x.addEventListener('mousedown', (e) => e.preventDefault());
+    x.addEventListener('click', () => {
+      dropThumb(item);
+      if (el.isConnected && !hasPending(el)) stripZw(el);
+      el.focus();
+    });
+    item.node.append(img, x);
+    tray.box.appendChild(item.node);
+    tray.items.push(item);
+    placeTray();
+  }
+  async function attachImages(el, files, verb) {
+    try {
+      const done = [];
+      for (const f of files) done.push({ f, marker: '[pasted image: ' + (await upload(f)) + ']' });
+      if (tray.el !== el) { for (const i of [...tray.items]) dropThumb(i); tray.el = el; }
+      for (const d of done) addThumb(el, d.f, d.marker);
+      el.focus();
+      keepSendable(el);
+      toast(`Image ${verb}: ` + done.map((d) => d.marker.slice(15, -1).split('/').pop()).join(', '));
+    } catch (e) {
+      toast(`Image ${verb === 'saved' ? 'paste' : 'drop'} failed: ` + e.message, true);
+    }
+  }
+  window.addEventListener('paste', (ev) => {
     const el = document.activeElement;
     const dt = ev.clipboardData;
     if (!dt || !isEditable(el)) return;
@@ -54,17 +147,51 @@
     if (!files.length) return;
     ev.preventDefault();
     ev.stopImmediatePropagation();
-    try {
-      const paths = [];
-      for (const f of files) paths.push(await upload(f));
-      insertText(el, paths.map((p) => '[pasted image: ' + p + ']').join(' ') + ' ');
-      toast('Image saved: ' + paths.map((p) => p.split('/').pop()).join(', '));
-    } catch (e) {
-      toast('Image paste failed: ' + e.message, true);
-    }
+    attachImages(el, files, 'saved');
   }, true);
-  const DIR = window.__CA_PASTE_DIR || '';
-  const IMG_CMD = /^\s*\/img\s+([\s\S]+)$/i;
+  const draggingImages = (dt) => !!dt && [...(dt.items || [])].some((i) => i.kind === 'file' && TYPES.includes(i.type));
+  const composer = (target) => {
+    if (isEditable(target)) return target;
+    if (isEditable(document.activeElement)) return document.activeElement;
+    return [...document.querySelectorAll('textarea')].filter((t) => t.offsetParent && !t.disabled).pop() || null;
+  };
+  let dropHint = null;
+  const hideHint = () => { if (dropHint) dropHint.style.display = 'none'; };
+  window.addEventListener('dragover', (ev) => {
+    if (!draggingImages(ev.dataTransfer)) return;
+    ev.preventDefault();
+    ev.dataTransfer.dropEffect = 'copy';
+    const el = composer(ev.target);
+    if (!el) return;
+    if (!dropHint) {
+      dropHint = document.createElement('div');
+      dropHint.setAttribute('data-ca-img-root', '');
+      dropHint.textContent = 'Drop image to attach';
+      dropHint.style.cssText = 'position:fixed;z-index:2147483644;pointer-events:none;border:2px dashed #4fc3f7;' +
+        'border-radius:8px;background:rgba(79,195,247,.12);color:#4fc3f7;font:600 13px sans-serif;' +
+        'display:flex;align-items:center;justify-content:center;';
+      document.body.appendChild(dropHint);
+    }
+    const r = el.getBoundingClientRect();
+    Object.assign(dropHint.style, { display: 'flex', left: r.left + 'px', top: r.top + 'px', width: r.width + 'px', height: r.height + 'px' });
+  }, true);
+  window.addEventListener('dragleave', (ev) => { if (!ev.relatedTarget) hideHint(); }, true);
+  window.addEventListener('drop', (ev) => {
+    hideHint();
+    const dt = ev.dataTransfer;
+    if (!draggingImages(dt)) return;
+    ev.preventDefault();
+    ev.stopImmediatePropagation();
+    const el = composer(ev.target);
+    if (!el) return toast('Image drop failed: chat box not found', true);
+    const files = [...dt.files].filter((f) => TYPES.includes(f.type));
+    if (!files.length) return toast('Image drop failed: only PNG, JPEG, GIF or WebP files', true);
+    el.focus();
+    attachImages(el, files, 'attached');
+  }, true);
+  const DIR = window.__CA_GEN_DIR || '';
+  const SVG2IMG = window.__CA_SVG2IMG || '';
+  const IMG_CMD = /^\s*\/img(?:\s+(png|jpe?g|svg)\b)?\s+([\s\S]+)$/i;
   let bypassEnter = false;
   const stamp = () => {
     const d = new Date();
@@ -79,36 +206,70 @@
     else document.execCommand('selectAll', false);
     insertText(el, text);
   }
-  function imageRequest(prompt, file) {
-    return `Create an image: ${prompt.trim()} — Draw it as one standalone SVG file (xmlns, width, height and ` +
+  function imageRequest(prompt, svg, out) {
+    const draw = `Create an image: ${prompt.trim()} — Draw it as one standalone SVG file (xmlns, width, height and ` +
       'viewBox set; inline styles only; no <script>, no external images, links or fonts). ' +
-      `Save it with the Edit tool to ${file} and create no other files. Reply with the saved path.`;
+      `Save it with the Edit tool to ${svg}`;
+    if (!out) return draw + ' and create no other files. Reply with the saved path.';
+    return draw + `, then convert it by running: python3 "${SVG2IMG}" "${svg}" "${out}" — ` +
+      `Create no other files. Reply with the ${out.split('.').pop().toUpperCase()} path: ${out}`;
   }
+  function resend(fn) {
+    setTimeout(() => {
+      bypassEnter = true;
+      try { fn(); } finally { bypassEnter = false; }
+    }, 60);
+  }
+  const pressEnter = (el) => el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }));
   window.addEventListener('keydown', (ev) => {
     if (bypassEnter || ev.key !== 'Enter' || ev.shiftKey || ev.ctrlKey || ev.altKey || ev.metaKey || ev.isComposing) return;
     const el = document.activeElement;
     if (!isEditable(el)) return;
-    const m = textOf(el).match(IMG_CMD);
-    if (!m) return;
+    const m = textOf(el).split(ZW).join('').match(IMG_CMD);
+    if (!m) {
+      if (!hasPending(el)) return;
+      ev.preventDefault();
+      ev.stopImmediatePropagation();
+      attachPending(el);
+      return resend(() => pressEnter(el));
+    }
     ev.preventDefault();
     ev.stopImmediatePropagation();
     if (!DIR) return toast('Image request failed: image folder unknown', true);
-    const name = `gen_${stamp()}.svg`;
-    replaceAll(el, imageRequest(m[1], `${DIR}/${name}`));
-    setTimeout(() => {
-      bypassEnter = true;
-      try {
-        el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }));
-      } finally {
-        bypassEnter = false;
-      }
+    const fmt = (m[1] || 'png').toLowerCase().replace('jpeg', 'jpg');
+    if (fmt !== 'svg' && !SVG2IMG) return toast('Image request failed: converter unknown', true);
+    const base = `${DIR}/gen_${stamp()}`;
+    const out = fmt === 'svg' ? '' : `${base}.${fmt}`;
+    const name = (out || `${base}.svg`).split('/').pop();
+    replaceAll(el, imageRequest(m[2], `${base}.svg`, out));
+    if (hasPending(el)) attachPending(el);
+    resend(() => {
+      pressEnter(el);
       toast('Image requested: ' + name + ' (press Enter if it was not sent)');
-    }, 60);
+    });
+  }, true);
+  window.addEventListener('submit', (ev) => {
+    const form = ev.target;
+    if (bypassEnter || !(form instanceof HTMLFormElement) || !tray.el || !form.contains(tray.el) || !hasPending(tray.el)) return;
+    ev.preventDefault();
+    ev.stopImmediatePropagation();
+    attachPending(tray.el);
+    const by = ev.submitter && form.contains(ev.submitter) ? ev.submitter : undefined;
+    resend(() => form.requestSubmit(by));
+  }, true);
+  window.addEventListener('click', (ev) => {
+    const btn = ev.target instanceof Element && ev.target.closest('.hub-background-action');
+    if (bypassEnter || !btn || !hasPending(tray.el)) return;
+    ev.preventDefault();
+    ev.stopImmediatePropagation();
+    attachPending(tray.el);
+    resend(() => btn.click());
   }, true);
   const IMG_EXT = /\.(?:svg|png|jpe?g|gif|webp)$/i;
   const IMG_HINT = /\.(?:svg|png|jpe?g|gif|webp)\b/i;
   const GEN_NAME = /(?:^|[\\/])(?:gen|paste)_\d{8}_\d{6}_\d{3}\.\w+$/i;
   const BLOCK = 'p,li,pre,td,blockquote,h1,h2,h3,h4,h5,h6,div';
+  const MARK = /\[pasted image: ([^\]\n]+?\.(?:png|jpe?g|gif|webp))\]\s?/gi;
   const SKIP = '[data-ca-img-root],textarea,input,script,style,[contenteditable="true"],[contenteditable=""]';
   const loaded = new Set();
   function lightbox(src, name) {
@@ -190,7 +351,17 @@
     });
     const hits = [];
     while (walker.nextNode()) hits.push(walker.currentNode);
-    for (const n of hits) for (const f of new Set(pathsInText(n.nodeValue))) attach(n.parentElement, f);
+    for (const n of hits) {
+      MARK.lastIndex = 0;
+      const marks = [...n.nodeValue.matchAll(MARK)];
+      if (marks.length) {
+        for (const m of marks) attach(n.parentElement, m[1]);
+        n.nodeValue = n.nodeValue.replace(MARK, '');
+      }
+      const found = [...new Set(pathsInText(n.nodeValue))];
+      const stems = new Set(found.filter((f) => !/\.svg$/i.test(f)).map((f) => f.replace(/\.\w+$/, '')));
+      for (const f of found) if (!/\.svg$/i.test(f) || !stems.has(f.replace(/\.\w+$/, ''))) attach(n.parentElement, f);
+    }
   }
   let pending = null;
   function startPreviews() {
