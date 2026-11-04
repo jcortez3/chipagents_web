@@ -1,10 +1,14 @@
 @echo off
 setlocal
-set WORKDIR=/mnt/c/Users/jcortez3/Desktop
-set STOPOLD=/mnt/c/Users/jcortez3/Desktop/chiagents\ web/paste-proxy/stop-old.sh
-set PROXY=/mnt/c/Users/jcortez3/Desktop/chiagents\ web/paste-proxy/paste-proxy.js
+set "CA_APP=%~dp0paste-proxy"
+set "CA_DESKTOP="
+for /f "usebackq delims=" %%D in (`powershell -NoProfile -Command "[Environment]::GetFolderPath('Desktop')"`) do set "CA_DESKTOP=%%D"
+if not defined CA_DESKTOP set "CA_DESKTOP=%USERPROFILE%\Desktop"
+set "WSLENV=CA_APP/p:CA_DESKTOP/p:%WSLENV%"
 echo Starting ChipAgents web with image paste ...
-wsl.exe -- bash -lc "bash %STOPOLD% ; cd %WORKDIR% && export NODE_EXTRA_CA_CERTS=$HOME/certs/adi-ca-bundle.pem && HUB_PORT=4242 PASTE_PROXY_PORT=4300 /usr/bin/node %PROXY%"
+echo   app folder: %CA_APP%
+echo   desktop:    %CA_DESKTOP%
+wsl.exe -- bash -lc "exec bash \"$CA_APP/start.sh\""
 echo.
 echo ChipAgents web stopped.
 pause

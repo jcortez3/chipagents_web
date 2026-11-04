@@ -4,9 +4,12 @@ const http = require('http');
 const net = require('net');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { spawn, execFile } = require('child_process');
 
-const PASTE_DIR = process.env.PASTE_DIR || '/mnt/c/Users/jcortez3/Desktop/screens';
+const BUILD = '2026-11-04b';
+
+const PASTE_DIR = process.env.PASTE_DIR || path.join(process.cwd(), 'screens');
 const GEN_DIR = process.env.GEN_DIR || path.join(PASTE_DIR, 'generated_images');
 fs.mkdirSync(GEN_DIR, { recursive: true });
 const PROXY_START = parseInt(process.env.PASTE_PROXY_PORT || '4300', 10);
@@ -23,7 +26,7 @@ const ROOTS_TTL_MS = 10 * 1000;
 const WORKSPACES_JSON = path.join(process.env.HOME || '', '.chipagents', 'workspaces.json');
 const EXTRA_ROOTS = (process.env.PREVIEW_ROOTS || '').split(path.delimiter).filter(Boolean);
 const INJECT_JS = Buffer.concat([
-  Buffer.from(`window.__CA_GEN_DIR=${JSON.stringify(GEN_DIR)};\n`),
+  Buffer.from(`window.__CA_PASTE_BUILD=${JSON.stringify(BUILD)};window.__CA_GEN_DIR=${JSON.stringify(GEN_DIR)};\n`),
   Buffer.from(`window.__CA_SVG2IMG=${JSON.stringify(path.join(__dirname, 'svg2img.py'))};\n`),
   fs.readFileSync(path.join(__dirname, 'paste-inject.js')),
 ]);
@@ -67,28 +70,71 @@ function originAllowed(req) {
 }
 
 const tokenCache = new Map();
+let launchToken = '';
 
-function requestToken(req) {
-  return req.headers['x-access-token'] || new URL(req.url, 'http://localhost').searchParams.get('token') || '';
+function bearer(req) {
+  const m = /^Bearer\s+(\S+)$/i.exec(req.headers.authorization || '');
+  return m ? m[1] : '';
 }
 
-function tokenValid(token) {
-  if (!token || !upstreamPort) return Promise.resolve(false);
-  if ((tokenCache.get(token) || 0) > Date.now()) return Promise.resolve(true);
+function requestToken(req) {
+  return req.headers['x-access-token'] || bearer(req) || new URL(req.url, 'http://localhost').searchParams.get('token') || '';
+}
+
+function sameSecret(a, b) {
+  const x = Buffer.from(String(a));
+  const y = Buffer.from(String(b));
+  return x.length === y.length && crypto.timingSafeEqual(x, y);
+}
+
+const AUTH_PROBES = ['/hub/api/workspaces', '/hub/api/threads', '/hub/api/projects', '/hub/api/settings'];
+const DENIED = new Set([401, 403]);
+
+function probe(p, creds) {
   return new Promise((resolve) => {
-    const r = http.request({
-      host: '127.0.0.1', port: upstreamPort, method: 'GET', path: '/hub/api/workspaces',
-      headers: { host: `127.0.0.1:${upstreamPort}`, 'x-access-token': token },
-    }, (up) => {
+    const headers = { host: `127.0.0.1:${upstreamPort}` };
+    if (creds.token) headers['x-access-token'] = creds.token;
+    if (creds.auth) headers.authorization = creds.auth;
+    if (creds.cookie) headers.cookie = creds.cookie;
+    const r = http.request({ host: '127.0.0.1', port: upstreamPort, method: 'GET', path: p, headers }, (up) => {
       up.resume();
-      const ok = up.statusCode === 200;
-      if (ok) tokenCache.set(token, Date.now() + TOKEN_TTL_MS);
-      resolve(ok);
+      resolve(up.statusCode);
     });
     r.setTimeout(5000, () => r.destroy());
-    r.on('error', () => resolve(false));
+    r.on('error', () => resolve(0));
     r.end();
   });
+}
+
+let lastWarn = { msg: '', at: 0 };
+function warnOnce(msg) {
+  if (msg === lastWarn.msg && Date.now() - lastWarn.at < 30000) return;
+  lastWarn = { msg, at: Date.now() };
+  console.warn(`[paste] ${msg}`);
+}
+
+async function authorized(req) {
+  const creds = { token: requestToken(req), auth: req.headers.authorization || '', cookie: req.headers.cookie || '' };
+  if (!upstreamPort) return false;
+  if (creds.token && launchToken && sameSecret(creds.token, launchToken)) return true;
+  if (!creds.token && !creds.cookie) {
+    warnOnce('request has no hub access token or cookie (open the link printed above in this browser)');
+    return false;
+  }
+  const key = [creds.token, creds.auth, creds.cookie].join('\n');
+  if ((tokenCache.get(key) || 0) > Date.now()) return true;
+  const seen = [];
+  for (const p of AUTH_PROBES) {
+    const [withCreds, without] = await Promise.all([probe(p, creds), probe(p, {})]);
+    seen.push(`${p} ${withCreds}/${without}`);
+    if (DENIED.has(without) && withCreds && !DENIED.has(withCreds)) {
+      tokenCache.set(key, Date.now() + TOKEN_TTL_MS);
+      return true;
+    }
+    if (DENIED.has(without) && DENIED.has(withCreds)) break;
+  }
+  warnOnce(`hub rejected the request's credentials (token: ${creds.token ? 'yes' : 'no'}, cookie: ${creds.cookie ? 'yes' : 'no'}; status with/without: ${seen.join(', ')})`);
+  return false;
 }
 
 let rootsCache = { at: 0, roots: [] };
@@ -141,7 +187,7 @@ async function resolveImage(raw) {
 
 async function handleImage(req, res) {
   if (req.method !== 'GET' && req.method !== 'HEAD') return sendJson(res, 405, { error: 'method not allowed' });
-  if (!(await tokenValid(requestToken(req)))) return sendJson(res, 401, { error: 'unauthorized' });
+  if (!(await authorized(req))) return sendJson(res, 401, { error: 'unauthorized' });
   const file = await resolveImage(new URL(req.url, 'http://localhost').searchParams.get('path'));
   if (!file) return sendJson(res, 404, { error: 'not found' });
   fs.readFile(file, (err, data) => {
@@ -163,7 +209,7 @@ async function handleUpload(req, res) {
   }
   const ext = EXT[String(req.headers['content-type'] || '').toLowerCase()];
   if (!ext) return sendJson(res, 415, { error: 'unsupported image type' });
-  if (!(await tokenValid(requestToken(req)))) {
+  if (!(await authorized(req))) {
     req.resume();
     return sendJson(res, 401, { error: 'unauthorized' });
   }
@@ -206,7 +252,7 @@ function proxyHttp(req, res) {
       upRes.on('data', (c) => chunks.push(c));
       upRes.on('end', () => {
         let body = Buffer.concat(chunks).toString('utf8');
-        body = body.includes('</head>') ? body.replace('</head>', `${TAG}</head>`) : TAG + body;
+        body = /<head[^>]*>/i.test(body) ? body.replace(/<head[^>]*>/i, (h) => h + TAG) : TAG + body;
         const buf = Buffer.from(body, 'utf8');
         h['content-length'] = String(buf.length);
         delete h['transfer-encoding'];
@@ -279,6 +325,7 @@ function openBrowser(url) {
 
 (async () => {
   proxyPort = await listen(PROXY_START);
+  console.log(`[paste] build ${BUILD}`);
   console.log(`[paste] proxy listening on 127.0.0.1:${proxyPort}, pasted -> ${PASTE_DIR}, generated -> ${GEN_DIR}`);
   const child = spawn(CHIPAGENTS, ['web'], {
     env: { ...process.env, HUB_PORT: HUB_START },
@@ -293,6 +340,7 @@ function openBrowser(url) {
       const m = line.match(URL_RE);
       if (m && !upstreamPort) {
         upstreamPort = parseInt(m[2], 10);
+        launchToken = new URL(m[3], 'http://localhost').searchParams.get('token') || '';
         const url = `http://localhost:${proxyPort}${m[3]}`;
         console.log(`  ChipAgents web (with image paste): ${url}`);
         console.log(`  (upstream chipagents web on port ${upstreamPort})`);

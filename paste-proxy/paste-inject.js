@@ -1,6 +1,47 @@
 (() => {
   if (window.__chipagentsPasteInstalled) return;
   window.__chipagentsPasteInstalled = true;
+  const TOKEN_KEY = 'chipagents-web-token';
+  let seenToken = '';
+  const remember = (t) => { if (t && typeof t === 'string') seenToken = t; };
+  const fromUrl = (u) => {
+    try { remember(new URL(String(u), location.href).searchParams.get('token')); } catch { seenToken = seenToken || ''; }
+  };
+  function fromHeaders(h) {
+    if (!h) return;
+    if (h instanceof Headers) {
+      remember(h.get('x-access-token'));
+      return remember((/^Bearer\s+(\S+)$/i.exec(h.get('authorization') || '') || [])[1]);
+    }
+    const pairs = Array.isArray(h) ? h : Object.entries(h);
+    for (const [k, v] of pairs) {
+      const name = String(k).toLowerCase();
+      if (name === 'x-access-token') remember(v);
+      else if (name === 'authorization') remember((/^Bearer\s+(\S+)$/i.exec(String(v)) || [])[1]);
+    }
+  }
+  fromUrl(location.href);
+  const nativeFetch = window.fetch;
+  window.fetch = function (input, init) {
+    try {
+      if (input instanceof Request) { fromHeaders(input.headers); fromUrl(input.url); } else fromUrl(input);
+      if (init) fromHeaders(init.headers);
+    } catch {
+      seenToken = seenToken || '';
+    }
+    return nativeFetch.apply(window, arguments);
+  };
+  for (const name of ['WebSocket', 'EventSource']) {
+    const Native = window[name];
+    if (typeof Native !== 'function') continue;
+    const Wrapped = function (url, ...rest) {
+      fromUrl(url);
+      return new Native(url, ...rest);
+    };
+    Wrapped.prototype = Native.prototype;
+    Object.setPrototypeOf(Wrapped, Native);
+    window[name] = Wrapped;
+  }
   const TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
   const isEditable = (el) =>
     !!el && (el.tagName === 'TEXTAREA' ||
@@ -29,9 +70,26 @@
       el.dispatchEvent(new Event('input', { bubbles: true }));
     }
   }
+  const LOOKS_LIKE_TOKEN = /^[\w.~+/=-]{16,512}$/;
   const token = () => {
-    try { return localStorage.getItem('chipagents-web-token') || ''; } catch { return ''; }
+    if (seenToken) return seenToken;
+    for (const store of [() => localStorage, () => sessionStorage]) {
+      try {
+        const s = store();
+        const v = s.getItem(TOKEN_KEY);
+        if (v) return v;
+        for (let i = 0; i < s.length; i++) {
+          const k = s.key(i);
+          const val = /token/i.test(k || '') ? s.getItem(k) : '';
+          if (val && LOOKS_LIKE_TOKEN.test(val)) return val;
+        }
+      } catch {
+        continue;
+      }
+    }
+    return '';
   };
+  const BUILD = window.__CA_PASTE_BUILD || 'unknown';
   async function upload(file) {
     const r = await fetch('/__paste/upload', {
       method: 'POST',
@@ -39,6 +97,10 @@
       body: file,
     });
     const j = await r.json().catch(() => ({}));
+    if (r.status === 401) {
+      throw new Error((token() ? 'hub access token was rejected. Reopen the link printed in the launcher window'
+        : 'this tab has no hub access token. Open the link printed in the launcher window') + ` (paste build ${BUILD})`);
+    }
     if (!r.ok || !j.path) throw new Error(j.error || 'HTTP ' + r.status);
     return j.path;
   }
@@ -299,10 +361,10 @@
     img.title = 'Click to enlarge: ' + file;
     img.style.cssText = 'display:none;max-width:min(480px,100%);max-height:360px;background:#fff;' +
       'border:1px solid rgba(127,127,127,.4);border-radius:6px;cursor:zoom-in;';
-    const base = '/__img?path=' + encodeURIComponent(file) + '&token=' + encodeURIComponent(token());
+    const base = () => '/__img?path=' + encodeURIComponent(file) + '&token=' + encodeURIComponent(token());
     const maxTries = GEN_NAME.test(file) ? 150 : 15;
     let tries = 0;
-    const load = () => { img.src = loaded.has(file) ? base : base + '&t=' + Date.now(); };
+    const load = () => { img.src = loaded.has(file) ? base() : base() + '&t=' + Date.now(); };
     img.onload = () => { loaded.add(file); img.style.display = 'block'; };
     img.onerror = () => {
       img.style.display = 'none';

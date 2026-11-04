@@ -12,7 +12,7 @@ inline image previews.
 - It injects `paste-inject.js` into the hub HTML. When an image (png, jpg,
   gif, webp) is pasted into the chat box, the script uploads it to
   `/__paste/upload`. The proxy saves it to
-  `/mnt/c/Users/jcortez3/Desktop/screens/paste_<timestamp>.<ext>`, and the
+  `<your Desktop>/screens/paste_<timestamp>.<ext>`, and the
   script adds no text to the chat box. The image appears only as a thumbnail
   above the box, and only what you type is shown. When the message is sent
   (Enter, the Send button or "Send to background"), `[pasted image: <path>]`
@@ -63,6 +63,33 @@ inline image previews.
 - The proxy connects to ChipAgents as the WSL user, so the Linux UID check
   passes without `CHIPAGENTS_DISABLE_UID_CHECK`.
 
+## Setup (any user)
+
+Copy the whole `chiagents web` folder anywhere, such as your Desktop or
+Downloads. No paths are tied to one user. Each PC needs:
+
+- WSL with Node.js 18 or newer (`node -v` in WSL).
+- The ChipAgents CLI installed in WSL and logged in
+  (`~/.local/bin/chipagents`, or `chipagents` on `PATH`).
+- For PNG/JPG output: Python 3 with Pillow in WSL
+  (`python3 -c "import PIL"`), and Chrome or Edge on Windows.
+- ADI CA bundle (needed when Netskope inspects HTTPS, otherwise the hub shows
+  "self signed certificate in certificate chain"). `start.sh` uses the first
+  `adi-ca-bundle.pem` it finds in `~/certs/`, next to the `chiagents web`
+  folder, or on the Desktop. If there is none, it exports the ADI and Netskope
+  CA certificates (deduplicated, EFS certificates excluded) from the user's
+  Windows certificate store to `~/certs/adi-ca-bundle.pem` and uses that.
+  For the `chipagents` CLI outside the launcher (for example
+  `chipagents login`), add
+  `export NODE_EXTRA_CA_CERTS=$HOME/certs/adi-ca-bundle.pem` to `~/.bashrc`.
+
+The launcher finds its own folder (`%~dp0`) and the logged-in user's Desktop
+(`[Environment]::GetFolderPath('Desktop')`, which handles OneDrive
+Desktops). It passes both to WSL through `WSLENV` (`/p` converts `C:\...`
+to `/mnt/c/...`) and runs `paste-proxy/start.sh`. That script checks for
+Node and ChipAgents, picks the CA bundle, sets `PASTE_DIR` to
+`<Desktop>/screens`, and starts the proxy from the Desktop.
+
 ## Usage
 
 Run `..\chipagents-web-paste.bat`. It first runs `stop-old.sh`, which stops
@@ -76,7 +103,7 @@ Use that link (port 4300), not the upstream port.
 
 | Variable | Default |
 |---|---|
-| `PASTE_DIR` | `/mnt/c/Users/jcortez3/Desktop/screens` |
+| `PASTE_DIR` | `<Desktop>/screens` (set by `start.sh`; `<cwd>/screens` if run directly) |
 | `GEN_DIR` | `$PASTE_DIR/generated_images` |
 | `PASTE_PROXY_PORT` | `4300` (first port tried) |
 | `HUB_PORT` | `4242` (start port for `chipagents web`) |
@@ -96,6 +123,13 @@ verification, usage and limits. Regenerate it with
 - Upload limit is 25 MB per image.
 - Uploads require the `X-ChipAgents-Paste: 1` header and a loopback origin
   on the proxy port.
+- The page script picks up the hub token from the hub's own requests
+  (`x-access-token` on `fetch`, `?token=` on WebSocket/EventSource and the
+  page URL), with `localStorage`/`sessionStorage` as fallbacks. This works
+  even if the browser blocks site storage or the hub keeps the token in
+  memory only. The proxy also forwards the browser's cookies when it checks a
+  request, so cookie-based hub sign-in works. A rejected request is logged once
+  per 30 s in the launcher window with status codes only, never the token.
 - Both `/__paste/upload` and `/__img` require the hub access token (the
   `x-access-token` header or `?token=`). The proxy checks it against
   `chipagents web` and caches valid tokens for 60 s.
