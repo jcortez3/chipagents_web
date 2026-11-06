@@ -578,6 +578,157 @@
       for (const f of found) if (!/\.svg$/i.test(f) || !stems.has(f.replace(/\.\w+$/, ''))) attach(n.parentElement, f);
     }
   }
+  const VSTYLE = 'display:inline-flex;align-items:center;gap:6px;margin-left:8px;font:12px/1.4 system-ui,sans-serif;' +
+    'white-space:nowrap;vertical-align:middle;';
+  const PHASES = { checking: 'checking…', downloading: 'downloading…', installing: 'installing…', restarting: 'restarting…' };
+  const ver = { box: null, info: null, polling: false };
+  const inFlight = (j) => !!j && !['done', 'failed'].includes(j.phase);
+  function versionHost() {
+    for (const el of document.querySelectorAll('.hub-side-brand, button[aria-label="Show sidebar"]')) {
+      if (el.offsetParent === null) continue;
+      const r = el.getBoundingClientRect();
+      if (r.width && r.top < 160 && r.left < window.innerWidth / 2) return el;
+    }
+    return null;
+  }
+  function placeBadge() {
+    if (!ver.box) {
+      ver.box = document.createElement('span');
+      ver.box.setAttribute('data-ca-img-root', '');
+      ver.box.setAttribute('data-ca-version', '');
+    }
+    const host = versionHost();
+    if (host) {
+      if (host.nextElementSibling !== ver.box) host.insertAdjacentElement('afterend', ver.box);
+      ver.box.style.cssText = VSTYLE;
+    } else {
+      if (ver.box.parentElement !== document.body) document.body.appendChild(ver.box);
+      ver.box.style.cssText = VSTYLE + 'position:fixed;left:12px;top:10px;z-index:2147483646;margin:0;';
+    }
+  }
+  function pillEl(text, title, css, onClick) {
+    const el = document.createElement(onClick ? 'button' : 'span');
+    if (onClick) {
+      el.type = 'button';
+      el.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); onClick(); });
+    }
+    el.textContent = text;
+    el.title = title;
+    el.style.cssText = 'padding:2px 8px;border-radius:10px;border:0;font:inherit;' + css + (onClick ? 'cursor:pointer;' : '');
+    return el;
+  }
+  function renderBadge() {
+    const i = ver.info;
+    if (!ver.box || !i) return;
+    ver.box.textContent = '';
+    const checked = i.checkedAt ? new Date(i.checkedAt).toLocaleTimeString() : 'never';
+    const tip = `ChipAgents ${i.current || '?'}` + (i.installed && i.installed !== i.current ? ` (installed: ${i.installed})` : '') +
+      `\nNewest on ${i.endpoint || 'server'}: ${i.latest || 'unknown' + (i.error ? ` (${i.error})` : '')}` +
+      `\nChecked ${checked}. Click to check again.`;
+    ver.box.appendChild(pillEl('v' + (i.current || '?'), tip, 'background:rgba(127,127,127,.18);color:inherit;opacity:.85;',
+      () => refreshVersion(true, true)));
+    const j = i.job;
+    if (inFlight(j)) {
+      ver.box.appendChild(pillEl(`Updating to ${j.to}: ${PHASES[j.phase] || j.phase}`, 'The hub restarts and this tab reloads by itself.',
+        'background:#b26a00;color:#fff;'));
+      return;
+    }
+    if (j && j.phase === 'failed') {
+      ver.box.appendChild(pillEl('Update failed', j.error || 'unknown error', 'background:#b3261e;color:#fff;',
+        () => toast('Update failed: ' + (j.error || 'unknown error'), true)));
+    }
+    if (!i.updateAvailable) return;
+    if (i.managed) {
+      ver.box.appendChild(pillEl(`${i.target} available`, 'Shared installation: ask your administrator to update it.',
+        'background:rgba(178,106,0,.2);color:inherit;'));
+      return;
+    }
+    ver.box.appendChild(pillEl(`⬆ Update to ${i.target}`, `Install ChipAgents ${i.target} and restart the hub`,
+      'background:#2e7d32;color:#fff;font-weight:600;', startUpdate));
+  }
+  async function refreshVersion(force, byUser) {
+    let r;
+    try {
+      r = await fetch('/__paste/version' + (force ? '?refresh=1' : ''), { headers: { 'x-access-token': token() }, cache: 'no-store' });
+      if (!r.ok) return;
+      ver.info = await r.json();
+    } catch {
+      return;
+    }
+    placeBadge();
+    renderBadge();
+    const i = ver.info;
+    if (byUser) {
+      if (i.updateAvailable) toast(`ChipAgents ${i.target} is available`);
+      else if (i.latest) toast(`ChipAgents ${i.current} is up to date`);
+      else toast(`Could not check for updates: ${i.error || 'no answer'}`, true);
+    }
+    if (inFlight(i.job)) void pollUpdate();
+  }
+  async function startUpdate() {
+    if (!ver.info || inFlight(ver.info.job)) return;
+    await refreshVersion(false);
+    const i = ver.info;
+    if (!i.updateAvailable || inFlight(i.job)) return;
+    if (i.running) {
+      const n = i.running;
+      toast(`${n} conversation${n > 1 ? 's are' : ' is'} still running. Update after ${n > 1 ? 'they finish' : 'it finishes'}, so the restart doesn't cut ${n > 1 ? 'them' : 'it'} off.`, true);
+      return;
+    }
+    if (!window.confirm(`Update ChipAgents ${i.current} → ${i.target}?\n\nThe hub restarts (about a minute) and this tab reloads by itself.`)) return;
+    let r;
+    let j = {};
+    try {
+      r = await fetch('/__paste/update', { method: 'POST', headers: { 'X-ChipAgents-Paste': '1', 'x-access-token': token() } });
+      j = await r.json().catch(() => ({}));
+    } catch (e) {
+      toast('Update failed: ' + e.message, true);
+      return;
+    }
+    if (!r.ok) {
+      toast('Update failed: ' + (j.error || 'HTTP ' + r.status), true);
+      return;
+    }
+    i.job = j.job;
+    renderBadge();
+    void pollUpdate();
+  }
+  async function pollUpdate() {
+    if (ver.polling) return;
+    ver.polling = true;
+    const until = Date.now() + 20 * 60000;
+    while (Date.now() < until) {
+      await new Promise((res) => setTimeout(res, 2000));
+      let j = null;
+      try {
+        const r = await fetch('/__paste/update', { headers: { 'x-access-token': token() }, cache: 'no-store' });
+        if (r.ok) j = (await r.json()).job;
+      } catch {
+        j = null;
+      }
+      if (!j) continue;
+      ver.info.job = j;
+      renderBadge();
+      if (j.phase === 'done' && j.url) {
+        toast(`ChipAgents updated to ${j.to}. Reloading…`);
+        setTimeout(() => { location.href = j.url; }, 800);
+        return;
+      }
+      if (j.phase === 'failed') {
+        toast('Update failed: ' + (j.error || 'unknown error'), true);
+        break;
+      }
+    }
+    ver.polling = false;
+  }
+  function startBadge() {
+    const first = (n) => refreshVersion(false).then(() => {
+      if (!ver.info && n > 0) setTimeout(() => first(n - 1), 5000);
+    });
+    void first(12);
+    setInterval(() => void refreshVersion(false), 30 * 60000);
+    setInterval(() => { if (ver.info) placeBadge(); }, 1500);
+  }
   let pending = null;
   function startPreviews() {
     new MutationObserver(() => {
@@ -585,6 +736,7 @@
       pending = setTimeout(() => { pending = null; scan(); }, 400);
     }).observe(document.body, { childList: true, subtree: true, characterData: true });
     scan();
+    startBadge();
   }
   if (document.body) startPreviews();
   else document.addEventListener('DOMContentLoaded', startPreviews, { once: true });

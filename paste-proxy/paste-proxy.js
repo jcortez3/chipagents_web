@@ -7,8 +7,9 @@ const path = require('path');
 const crypto = require('crypto');
 const { spawn, execFile } = require('child_process');
 const conversations = require('./conversations');
+const { create: createUpdater, compare: compareVersions } = require('./updater');
 
-const BUILD = '2026-11-06a';
+const BUILD = '2026-11-06b';
 
 const PASTE_DIR = process.env.PASTE_DIR || path.join(process.cwd(), 'screens');
 const GEN_DIR = process.env.GEN_DIR || path.join(PASTE_DIR, 'generated_images');
@@ -17,6 +18,7 @@ const PROXY_START = parseInt(process.env.PASTE_PROXY_PORT || '4300', 10);
 const HUB_START = process.env.HUB_PORT || '4242';
 const CHIPAGENTS = process.env.CHIPAGENTS_BIN || path.join(process.env.HOME || '', '.local/bin/chipagents');
 const OPEN_BROWSER = process.env.PASTE_NO_BROWSER !== '1';
+const updater = createUpdater({ bin: CHIPAGENTS });
 const MB = 1024 * 1024;
 const mbEnv = (name, def) => (parseFloat(process.env[name]) > 0 ? parseFloat(process.env[name]) : def) * MB;
 const MAX_BYTES = 25 * MB;
@@ -379,6 +381,8 @@ const server = http.createServer((req, res) => {
   if (p === '/__paste/upload') return void handleUpload(req, res).catch(fail);
   if (p === '/__img') return void handleImage(req, res).catch(fail);
   if (p === '/__file') return void handleFile(req, res).catch(fail);
+  if (p === '/__paste/version') return void handleVersion(req, res).catch(fail);
+  if (p === '/__paste/update') return void handleUpdate(req, res).catch(fail);
   const run = req.method === 'GET' && /^\/hub\/api\/runs\/([\w-]{8,80})$/.exec(p);
   if (run && sync) sync.touch(run[1]);
   proxyHttp(req, res);
@@ -423,29 +427,169 @@ function openBrowser(url) {
   execFile('rundll32.exe', ['url.dll,FileProtocolHandler', url], () => {});
 }
 
-(async () => {
-  proxyPort = await listen(PROXY_START);
-  console.log(`[paste] build ${BUILD}`);
-  console.log(`[paste] proxy listening on 127.0.0.1:${proxyPort}, pasted -> ${PASTE_DIR}, generated -> ${GEN_DIR}`);
-  if (!CONV_SYNC) console.log('[conversations] sync turned off (CONV_SYNC=0)');
-  const child = spawn(CHIPAGENTS, ['web'], {
+let child = null;
+let restarting = false;
+let hubVersion = '';
+let firstStart = true;
+let job = null;
+const oldTokens = new Map();
+const LIVE = new Set(['running', 'starting', 'waiting_for_user']);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function oldTokenValid(req) {
+  const t = requestToken(req);
+  if (!t) return false;
+  for (const [tok, until] of oldTokens) {
+    if (until < Date.now()) oldTokens.delete(tok);
+    else if (sameSecret(t, tok)) return true;
+  }
+  return false;
+}
+
+function hubJson(p) {
+  return new Promise((resolve) => {
+    if (!upstreamPort) return resolve(null);
+    const headers = { host: `127.0.0.1:${upstreamPort}`, 'x-access-token': launchToken, accept: 'application/json' };
+    const r = http.request({ host: '127.0.0.1', port: upstreamPort, method: 'GET', path: p, headers }, (up) => {
+      const chunks = [];
+      up.on('data', (c) => chunks.push(c));
+      up.on('end', () => {
+        try {
+          resolve(up.statusCode === 200 ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : null);
+        } catch {
+          resolve(null);
+        }
+      });
+    });
+    r.setTimeout(10000, () => r.destroy());
+    r.on('error', () => resolve(null));
+    r.end();
+  });
+}
+
+async function runningCount() {
+  const j = await hubJson('/hub/api/runs');
+  const runs = Array.isArray(j) ? j : (j && j.runs) || [];
+  return runs.filter((r) => r && LIVE.has(r.status)).length;
+}
+
+function publicJob() {
+  if (!job) return null;
+  const { phase, from, to, error, startedAt, url } = job;
+  return { phase, from, to, error, startedAt, ...(phase === 'done' ? { url } : {}) };
+}
+
+async function versionInfo(force) {
+  const installed = await updater.installed();
+  const info = await updater.latest(hubVersion || installed, force);
+  const target = [info.latest, installed].filter(Boolean).sort(compareVersions).pop() || '';
+  return {
+    current: hubVersion || installed,
+    installed,
+    latest: info.latest,
+    target,
+    updateAvailable: !!target && compareVersions(target, hubVersion || installed) > 0,
+    managed: updater.managed(),
+    endpoint: info.endpoint,
+    checkedAt: info.checkedAt,
+    error: info.error,
+    running: await runningCount(),
+    job: publicJob(),
+  };
+}
+
+async function restartHub() {
+  if (launchToken) oldTokens.set(launchToken, Date.now() + 10 * 60 * 1000);
+  restarting = true;
+  const old = child;
+  old.kill('SIGTERM');
+  const killer = setTimeout(() => old.kill('SIGKILL'), 20000);
+  const deadline = Date.now() + 180000;
+  while (Date.now() < deadline) {
+    await sleep(500);
+    if (child !== old && upstreamPort && launchToken) {
+      clearTimeout(killer);
+      return;
+    }
+  }
+  clearTimeout(killer);
+  throw new Error('chipagents web did not come back within 3 minutes');
+}
+
+async function runUpdate(info) {
+  job = { phase: 'checking', from: info.current, to: info.target, error: '', startedAt: Date.now(), url: '' };
+  const say = (phase) => {
+    job.phase = phase;
+    console.log(`[update] ${job.from} -> ${job.to}: ${phase}`);
+  };
+  try {
+    if (compareVersions(info.installed, info.target) < 0) {
+      const v = await updater.install(say);
+      job.to = v;
+    }
+    say('restarting');
+    await restartHub();
+    job.url = `/hub?token=${encodeURIComponent(launchToken)}`;
+    say('done');
+  } catch (e) {
+    job.error = e.message;
+    say('failed');
+    console.warn(`[update] ${e.message}`);
+  }
+}
+
+async function handleVersion(req, res) {
+  if (req.method !== 'GET') return sendJson(res, 405, { error: 'method not allowed' });
+  if (!(await authorized(req))) return sendJson(res, 401, { error: 'unauthorized' });
+  const force = new URL(req.url, 'http://localhost').searchParams.get('refresh') === '1';
+  sendJson(res, 200, await versionInfo(force));
+}
+
+async function handleUpdate(req, res) {
+  if (req.method === 'GET') {
+    if (!oldTokenValid(req) && !(await authorized(req))) return sendJson(res, 401, { error: 'unauthorized' });
+    return sendJson(res, 200, { job: publicJob() });
+  }
+  if (req.method !== 'POST' || req.headers['x-chipagents-paste'] !== '1' || !originAllowed(req)) {
+    return sendJson(res, 403, { error: 'forbidden' });
+  }
+  if (!(await authorized(req))) return sendJson(res, 401, { error: 'unauthorized' });
+  if (job && !['done', 'failed'].includes(job.phase)) return sendJson(res, 409, { error: 'an update is already running', job: publicJob() });
+  const info = await versionInfo(true);
+  if (info.managed) return sendJson(res, 400, { error: 'shared installation: ask your administrator to update it' });
+  if (!info.updateAvailable) return sendJson(res, 400, { error: `already on the newest version (${info.current})` });
+  if (info.running) {
+    const n = info.running;
+    return sendJson(res, 409, { error: `${n} conversation${n > 1 ? 's are' : ' is'} still running; update after ${n > 1 ? 'they finish' : 'it finishes'} (or stop ${n > 1 ? 'them' : 'it'})`, running: n });
+  }
+  void runUpdate(info);
+  sendJson(res, 202, { job: publicJob() });
+}
+
+function startHub() {
+  upstreamPort = null;
+  launchToken = '';
+  child = spawn(CHIPAGENTS, ['web'], {
     env: { ...process.env, HUB_PORT: HUB_START },
     stdio: ['inherit', 'pipe', 'inherit'],
   });
+  const me = child;
+  void updater.installed().then((v) => { if (child === me) hubVersion = v; });
   let buf = '';
-  child.stdout.on('data', (d) => {
+  me.stdout.on('data', (d) => {
     buf += d.toString();
     const lines = buf.split('\n');
     buf = lines.pop();
     for (const line of lines) {
       const m = line.match(URL_RE);
-      if (m && !upstreamPort) {
+      if (m && !upstreamPort && child === me) {
         upstreamPort = parseInt(m[2], 10);
         launchToken = new URL(m[3], 'http://localhost').searchParams.get('token') || '';
         const url = `http://localhost:${proxyPort}${m[3]}`;
         console.log(`  ChipAgents web (with image paste): ${url}`);
-        console.log(`  (upstream chipagents web on port ${upstreamPort})`);
-        openBrowser(url);
+        console.log(`  (upstream chipagents web ${hubVersion || ''} on port ${upstreamPort})`);
+        if (firstStart) openBrowser(url);
+        firstStart = false;
         if (CONV_SYNC && !sync) {
           try {
             sync = conversations.start({
@@ -466,11 +610,32 @@ function openBrowser(url) {
       }
     }
   });
-  const stop = () => { child.kill('SIGTERM'); };
+  me.on('exit', (code) => {
+    if (child !== me) return;
+    if (restarting) {
+      restarting = false;
+      console.log('[update] starting chipagents web again');
+      startHub();
+      return;
+    }
+    server.close();
+    process.exit(code ?? 0);
+  });
+}
+
+(async () => {
+  proxyPort = await listen(PROXY_START);
+  console.log(`[paste] build ${BUILD}`);
+  console.log(`[paste] proxy listening on 127.0.0.1:${proxyPort}, pasted -> ${PASTE_DIR}, generated -> ${GEN_DIR}`);
+  if (!CONV_SYNC) console.log('[conversations] sync turned off (CONV_SYNC=0)');
+  startHub();
+  const stop = () => {
+    restarting = false;
+    child.kill('SIGTERM');
+  };
   process.on('SIGINT', stop);
   process.on('SIGTERM', stop);
   process.on('SIGHUP', stop);
-  child.on('exit', (code) => { server.close(); process.exit(code ?? 0); });
 })().catch((e) => {
   console.error(`[paste] failed: ${e.message}`);
   process.exit(1);

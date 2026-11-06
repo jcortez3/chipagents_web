@@ -94,6 +94,22 @@ async function readJson(file, fallback) {
   }
 }
 
+function entryTime(e) {
+  const t = e && e.timestamp;
+  const n = typeof t === 'number' ? t : Date.parse(t);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function mergeSaved(run, saved) {
+  const old = saved && saved.id === run.id && Array.isArray(saved.transcript) ? saved.transcript : [];
+  const now = Array.isArray(run.transcript) ? run.transcript : [];
+  const ids = new Set(now.map((e) => e && e.id));
+  const missing = old.filter((e) => e && e.id && !ids.has(e.id));
+  if (!missing.length) return 0;
+  run.transcript = missing.concat(now).sort((a, b) => entryTime(a) - entryTime(b));
+  return missing.length;
+}
+
 function parseCall(entry) {
   const name = (entry.meta && entry.meta.toolName) || entry.title || '';
   const text = String(entry.text || '');
@@ -392,10 +408,13 @@ function start(opts) {
     const folder = await folderFor(run);
     if (!folder) return;
     await fs.promises.mkdir(folder, { recursive: true });
+    const jsonFile = path.join(folder, 'conversation.json');
+    const added = mergeSaved(run, await readJson(jsonFile, null));
+    if (added) log(`kept ${added} earlier entries of "${run.title || id}" that the hub no longer shows`);
     const stateFile = path.join(folder, '.sync.json');
     const state = await readJson(stateFile, { files: {} });
     const rows = await copyItems(folder, collect(run), state);
-    await writeAtomic(path.join(folder, 'conversation.json'), res.text);
+    await writeAtomic(jsonFile, added ? JSON.stringify(run) : res.text);
     await writeAtomic(path.join(folder, 'conversation.md'), render(run, rows));
     await writeAtomic(stateFile, JSON.stringify(state, null, 2));
     await writeAtomic(indexFile, JSON.stringify(index, null, 2));

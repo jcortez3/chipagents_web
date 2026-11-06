@@ -164,9 +164,37 @@ Desktop/ChipAgents Conversations/
 - Files touched only by a subagent are not visible in the transcript and are
   not copied. Paths reached indirectly by shell commands (globs, `cd` plus a
   relative name) can be missed.
+- Saved history is never shortened: if the hub shows less than the folder
+  already has (e.g. after a restart), the earlier entries are kept and merged.
 - It relies on the hub's internal API (checked on 0.44.3). If the API stops
   answering, the launcher logs `[conversations] sync disabled` and paste keeps
   working.
+
+## Version and updates
+
+The running version is shown beside the ChipAgents logo (top left), e.g.
+`v0.44.3`. Click it to check for updates again (it also checks every 30 min).
+
+The terminal CLI updates itself when it starts, but `chipagents web` does not,
+so Web-only users can fall behind. When the server in your `config.toml`
+(`endpoint_url`, ADI's server for ADI installs) offers a newer version, a green
+**⬆ Update to x.y.z** button appears. Clicking it:
+
+1. waits until no conversation is running (a restart in the middle of a reply
+   leaves the hub showing only the part after the restart), then asks for
+   confirmation;
+2. downloads `install.sh` from that server and runs it with `--json`, using
+   the system and ADI certificates for its `curl` (Netskope);
+3. restarts `chipagents web` on the new version. The tab reloads by itself
+   with the new sign-in link.
+
+The steps show in the pill and in the launcher window (`[update] ...`). If the
+installer fails, the error is shown and the old version keeps running. Older
+versions stay in `~/.chipagents/chipagents/`. To go back, re-point
+`~/.local/bin/chipagents` to one of them and restart the launcher.
+
+Shared installs (`CHIPAGENTS_INSTALL` set, or no write access) only show
+"x.y.z available"; your administrator updates those.
 
 ## Limits
 
