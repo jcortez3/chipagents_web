@@ -56,6 +56,7 @@ if [ -z "${NODE_EXTRA_CA_CERTS:-}" ]; then
 fi
 bash "$APP_DIR/stop-old.sh"
 export PASTE_DIR="${PASTE_DIR:-$desktop/screens}"
+export CONV_DIR="${CONV_DIR:-$desktop/ChipAgents Conversations}"
 say "user: $(whoami), desktop: $desktop"
 cd "$desktop" || exit 1
 exec env HUB_PORT="${HUB_PORT:-4242}" PASTE_PROXY_PORT="${PASTE_PROXY_PORT:-4300}" node "$APP_DIR/paste-proxy.js"

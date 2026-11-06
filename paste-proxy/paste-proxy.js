@@ -6,8 +6,9 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { spawn, execFile } = require('child_process');
+const conversations = require('./conversations');
 
-const BUILD = '2026-11-04b';
+const BUILD = '2026-11-06a';
 
 const PASTE_DIR = process.env.PASTE_DIR || path.join(process.cwd(), 'screens');
 const GEN_DIR = process.env.GEN_DIR || path.join(PASTE_DIR, 'generated_images');
@@ -16,7 +17,15 @@ const PROXY_START = parseInt(process.env.PASTE_PROXY_PORT || '4300', 10);
 const HUB_START = process.env.HUB_PORT || '4242';
 const CHIPAGENTS = process.env.CHIPAGENTS_BIN || path.join(process.env.HOME || '', '.local/bin/chipagents');
 const OPEN_BROWSER = process.env.PASTE_NO_BROWSER !== '1';
-const MAX_BYTES = 25 * 1024 * 1024;
+const MB = 1024 * 1024;
+const mbEnv = (name, def) => (parseFloat(process.env[name]) > 0 ? parseFloat(process.env[name]) : def) * MB;
+const MAX_BYTES = 25 * MB;
+const UPLOAD_MAX = mbEnv('UPLOAD_MAX_MB', 100);
+const BATCH_MAX_BYTES = 1024 * MB;
+const BATCH_MAX_FILES = 2000;
+const CONV_DIR = process.env.CONV_DIR || path.join(process.cwd(), 'ChipAgents Conversations');
+const CONV_SYNC = process.env.CONV_SYNC !== '0';
+const ATTACH_DIR = path.join(PASTE_DIR, 'attachments');
 const EXT = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp' };
 const MIME = { svg: 'image/svg+xml', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp' };
 const IMG_EXT_RE = /\.(svg|png|jpe?g|gif|webp)$/i;
@@ -35,6 +44,7 @@ const URL_RE = /http:\/\/(localhost|127\.0\.0\.1):(\d+)(\/hub\S*)/;
 
 let upstreamPort = null;
 let proxyPort = null;
+let sync = null;
 
 function swapPort(v, port) {
   if (typeof v !== 'string') return v;
@@ -149,7 +159,7 @@ async function previewRoots() {
     ws = [];
   }
   const roots = [];
-  for (const r of [PASTE_DIR, GEN_DIR, process.cwd(), ...EXTRA_ROOTS, ...ws]) {
+  for (const r of [PASTE_DIR, GEN_DIR, CONV_DIR, process.cwd(), ...EXTRA_ROOTS, ...ws]) {
     try {
       const real = await fs.promises.realpath(r);
       if (!roots.includes(real)) roots.push(real);
@@ -166,23 +176,47 @@ function toPosix(p) {
   return m ? `/mnt/${m[1].toLowerCase()}/${m[2].replace(/\\/g, '/')}` : p;
 }
 
-async function resolveImage(raw) {
+async function resolveUnderRoots(raw, accept) {
   const p = toPosix(String(raw || '').trim());
-  if (!p || p.includes('\0') || !IMG_EXT_RE.test(p)) return null;
+  if (!p || p.includes('\0') || !accept(p)) return null;
   const roots = await previewRoots();
   const candidates = path.isAbsolute(p) ? [p] : roots.map((r) => path.join(r, p));
   for (const c of candidates) {
     try {
       const real = await fs.promises.realpath(c);
-      if (!IMG_EXT_RE.test(real)) continue;
+      if (!accept(real)) continue;
       if (!roots.some((r) => real.startsWith(r + path.sep))) continue;
       const st = await fs.promises.stat(real);
-      if (st.isFile() && st.size <= MAX_BYTES) return real;
+      if (st.isFile()) return { real, size: st.size };
     } catch {
       continue;
     }
   }
   return null;
+}
+
+async function resolveImage(raw) {
+  const hit = await resolveUnderRoots(raw, (p) => IMG_EXT_RE.test(p));
+  return hit && hit.size <= MAX_BYTES ? hit.real : null;
+}
+
+async function handleFile(req, res) {
+  if (req.method !== 'GET' && req.method !== 'HEAD') return sendJson(res, 405, { error: 'method not allowed' });
+  if (!(await authorized(req))) return sendJson(res, 401, { error: 'unauthorized' });
+  const hit = await resolveUnderRoots(new URL(req.url, 'http://localhost').searchParams.get('path'), (p) => !conversations.SECRET_RE.test(p));
+  if (!hit) return sendJson(res, 404, { error: 'not found' });
+  res.writeHead(200, {
+    'Content-Type': 'application/octet-stream',
+    'Content-Length': hit.size,
+    'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(path.basename(hit.real))}`,
+    'Cache-Control': 'no-store',
+    'Content-Security-Policy': IMG_CSP,
+    'X-Content-Type-Options': 'nosniff',
+  });
+  if (req.method === 'HEAD') return void res.end();
+  const s = fs.createReadStream(hit.real);
+  s.on('error', () => res.destroy());
+  s.pipe(res);
 }
 
 async function handleImage(req, res) {
@@ -207,37 +241,100 @@ async function handleUpload(req, res) {
   if (req.method !== 'POST' || req.headers['x-chipagents-paste'] !== '1' || !originAllowed(req)) {
     return sendJson(res, 403, { error: 'forbidden' });
   }
-  const ext = EXT[String(req.headers['content-type'] || '').toLowerCase()];
-  if (!ext) return sendJson(res, 415, { error: 'unsupported image type' });
   if (!(await authorized(req))) {
     req.resume();
     return sendJson(res, 401, { error: 'unauthorized' });
   }
-  const chunks = [];
+  let target;
+  try {
+    target = uploadTarget(req);
+  } catch (e) {
+    req.resume();
+    return sendJson(res, e.status || 400, { error: e.message });
+  }
+  const declared = parseInt(req.headers['content-length'] || '0', 10);
+  if (declared > UPLOAD_MAX) {
+    req.resume();
+    return sendJson(res, 413, { error: `file larger than ${UPLOAD_MAX / MB} MB` });
+  }
+  await fs.promises.mkdir(path.dirname(target.file), { recursive: true });
+  const part = `${target.file}.part-${process.pid}`;
+  const out = fs.createWriteStream(part);
   let size = 0;
-  let tooBig = false;
+  let failed = false;
+  const fail = (code, msg) => {
+    if (failed) return;
+    failed = true;
+    out.destroy();
+    fs.promises.rm(part, { force: true }).catch(() => {});
+    req.resume();
+    sendJson(res, code, { error: msg });
+  };
   req.on('data', (c) => {
-    if (tooBig) return;
     size += c.length;
-    if (size > MAX_BYTES) {
-      tooBig = true;
-      sendJson(res, 413, { error: 'image larger than 25 MB' });
-      return;
+    if (size > UPLOAD_MAX) fail(413, `file larger than ${UPLOAD_MAX / MB} MB`);
+    else if (target.batch && target.batch.bytes + size > BATCH_MAX_BYTES) fail(413, 'folder larger than 1 GB');
+  });
+  req.on('error', () => fail(400, 'upload interrupted'));
+  out.on('error', (e) => fail(500, e.message));
+  req.pipe(out);
+  out.on('finish', async () => {
+    if (failed) return;
+    try {
+      await fs.promises.rename(part, target.file);
+    } catch (e) {
+      return fail(500, e.message);
     }
-    chunks.push(c);
+    if (target.batch) {
+      target.batch.bytes += size;
+      target.batch.at = Date.now();
+    }
+    console.log(`[paste] saved ${target.file} (${size} bytes)`);
+    sendJson(res, 200, target.folder ? { path: target.file, folder: target.folder } : { path: target.file });
   });
-  req.on('end', () => {
-    if (tooBig) return;
-    const file = path.join(PASTE_DIR, `paste_${stamp()}.${ext}`);
-    fs.mkdir(PASTE_DIR, { recursive: true }, (mkErr) => {
-      if (mkErr) return sendJson(res, 500, { error: mkErr.message });
-      fs.writeFile(file, Buffer.concat(chunks), (err) => {
-        if (err) return sendJson(res, 500, { error: err.message });
-        console.log(`[paste] saved ${file} (${size} bytes)`);
-        sendJson(res, 200, { path: file });
-      });
-    });
-  });
+}
+
+const batches = new Map();
+
+function badRequest(msg, status = 400) {
+  return Object.assign(new Error(msg), { status });
+}
+
+function decodeHeader(v) {
+  try {
+    return decodeURIComponent(String(v || ''));
+  } catch {
+    throw badRequest('bad file name');
+  }
+}
+
+function cleanPart(s) {
+  const out = String(s).replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_').replace(/^[\s.]+|[\s.]+$/g, '').slice(0, 120);
+  if (!out) throw badRequest('bad file name');
+  return out;
+}
+
+function uploadTarget(req) {
+  const type = String(req.headers['content-type'] || '').toLowerCase().split(';')[0].trim();
+  const name = decodeHeader(req.headers['x-file-name']);
+  const rel = decodeHeader(req.headers['x-rel-path']);
+  const batchId = String(req.headers['x-batch'] || '');
+  if (rel) {
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(batchId)) throw badRequest('bad batch id');
+    const parts = rel.split('/');
+    if (parts.length < 2 || parts.length > 32 || parts.some((p) => !p || p === '.' || p === '..' || /[\\:]/.test(p))) throw badRequest('bad folder path');
+    const clean = parts.map(cleanPart);
+    for (const [k, b] of batches) if (Date.now() - b.at > 3600 * 1000) batches.delete(k);
+    let batch = batches.get(batchId);
+    if (!batch) {
+      batch = { dir: path.join(ATTACH_DIR, `${stamp()}_${clean[0]}`), files: 0, bytes: 0, at: Date.now() };
+      batches.set(batchId, batch);
+    }
+    if (++batch.files > BATCH_MAX_FILES) throw badRequest(`folder has more than ${BATCH_MAX_FILES} files`, 413);
+    return { file: path.join(batch.dir, ...clean.slice(1)), folder: batch.dir, batch };
+  }
+  if (EXT[type]) return { file: path.join(PASTE_DIR, `paste_${stamp()}.${EXT[type]}`) };
+  return { file: path.join(ATTACH_DIR, `${stamp()}_${cleanPart(path.basename(name || 'file'))}`) };
 }
 
 function proxyHttp(req, res) {
@@ -281,6 +378,9 @@ const server = http.createServer((req, res) => {
   const fail = (e) => sendJson(res, 500, { error: e.message });
   if (p === '/__paste/upload') return void handleUpload(req, res).catch(fail);
   if (p === '/__img') return void handleImage(req, res).catch(fail);
+  if (p === '/__file') return void handleFile(req, res).catch(fail);
+  const run = req.method === 'GET' && /^\/hub\/api\/runs\/([\w-]{8,80})$/.exec(p);
+  if (run && sync) sync.touch(run[1]);
   proxyHttp(req, res);
 });
 server.requestTimeout = 0;
@@ -327,6 +427,7 @@ function openBrowser(url) {
   proxyPort = await listen(PROXY_START);
   console.log(`[paste] build ${BUILD}`);
   console.log(`[paste] proxy listening on 127.0.0.1:${proxyPort}, pasted -> ${PASTE_DIR}, generated -> ${GEN_DIR}`);
+  if (!CONV_SYNC) console.log('[conversations] sync turned off (CONV_SYNC=0)');
   const child = spawn(CHIPAGENTS, ['web'], {
     env: { ...process.env, HUB_PORT: HUB_START },
     stdio: ['inherit', 'pipe', 'inherit'],
@@ -345,6 +446,21 @@ function openBrowser(url) {
         console.log(`  ChipAgents web (with image paste): ${url}`);
         console.log(`  (upstream chipagents web on port ${upstreamPort})`);
         openBrowser(url);
+        if (CONV_SYNC && !sync) {
+          try {
+            sync = conversations.start({
+              root: CONV_DIR,
+              pasteDir: PASTE_DIR,
+              genDir: GEN_DIR,
+              fileMaxBytes: mbEnv('CONV_FILE_MAX_MB', 100),
+              totalMaxBytes: mbEnv('CONV_TOTAL_MAX_MB', 2000),
+              hubPort: () => upstreamPort,
+              token: () => launchToken,
+            });
+          } catch (e) {
+            console.warn(`[conversations] not started: ${e.message}`);
+          }
+        }
       } else if (!m) {
         console.log(line);
       }

@@ -90,10 +90,17 @@
     return '';
   };
   const BUILD = window.__CA_PASTE_BUILD || 'unknown';
-  async function upload(file) {
+  const MAX_FILE = 100 * 1048576;
+  const MAX_DIR = 1024 * 1048576;
+  const MAX_FILES = 2000;
+  const human = (n) => n < 1024 ? n + ' B' : n < 1048576 ? (n / 1024).toFixed(1) + ' KB' : (n / 1048576).toFixed(1) + ' MB';
+  async function upload(file, extra) {
     const r = await fetch('/__paste/upload', {
       method: 'POST',
-      headers: { 'Content-Type': file.type, 'X-ChipAgents-Paste': '1', 'x-access-token': token() },
+      headers: Object.assign({
+        'Content-Type': file.type || 'application/octet-stream', 'X-ChipAgents-Paste': '1', 'x-access-token': token(),
+        'X-File-Name': encodeURIComponent(file.name || 'file'),
+      }, extra),
       body: file,
     });
     const j = await r.json().catch(() => ({}));
@@ -102,7 +109,7 @@
         : 'this tab has no hub access token. Open the link printed in the launcher window') + ` (paste build ${BUILD})`);
     }
     if (!r.ok || !j.path) throw new Error(j.error || 'HTTP ' + r.status);
-    return j.path;
+    return j;
   }
   function setValue(el, v) {
     const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
@@ -120,12 +127,28 @@
     if ('value' in el && el.value.includes(ZW)) setValue(el, el.value.split(ZW).join(''));
   }
   function attachPending(el) {
-    const items = unsent();
+    const items = unsent().filter((i) => i.marker && !i.busy);
     if (!items.length) return;
     const typed = el.value.split(ZW).join('');
     const marks = items.map((i) => i.marker).join(' ');
     setValue(el, typed.trim() ? marks + ' ' + typed : marks);
     for (const i of items) i.sent = true;
+  }
+  let waiting = false;
+  const busy = () => unsent().some((i) => i.busy);
+  function sendWhenReady(el, fn) {
+    if (waiting) return;
+    const t0 = Date.now();
+    const go = () => {
+      if (busy() && Date.now() - t0 < 600000) return void setTimeout(go, 200);
+      waiting = false;
+      if (busy()) return toast('Attach failed: folder upload still running after 10 minutes', true);
+      attachPending(el);
+      resend(fn);
+    };
+    waiting = true;
+    if (busy()) toast('Waiting for folder upload to finish\u2026');
+    go();
   }
   function placeTray() {
     if (!tray.box) return;
@@ -136,7 +159,7 @@
     tray.box.style.bottom = (window.innerHeight - r.top + 6) + 'px';
   }
   function dropThumb(item) {
-    URL.revokeObjectURL(item.url);
+    if (item.url) URL.revokeObjectURL(item.url);
     item.node.remove();
     tray.items = tray.items.filter((i) => i !== item);
     placeTray();
@@ -149,7 +172,7 @@
     if (!gone) keepSendable(tray.el);
     placeTray();
   }
-  function addThumb(el, file, marker) {
+  function useTray(el) {
     if (!tray.box) {
       tray.box = document.createElement('div');
       tray.box.setAttribute('data-ca-img-root', '');
@@ -161,16 +184,14 @@
       document.addEventListener('input', syncTray, true);
       setInterval(syncTray, 700);
     }
-    const item = { marker, sent: false, url: URL.createObjectURL(file), node: document.createElement('div') };
+    if (tray.el !== el) { for (const i of [...tray.items]) dropThumb(i); tray.el = el; }
+  }
+  function addItem(el, item, content, what) {
     item.node.style.cssText = 'position:relative;flex:0 0 auto;';
-    const img = new Image();
-    img.src = item.url;
-    img.title = marker.slice(15, -1).split('/').pop();
-    img.style.cssText = 'display:block;height:56px;max-width:120px;object-fit:cover;border-radius:4px;background:#fff;';
     const x = document.createElement('button');
     x.type = 'button';
     x.textContent = '\u2715';
-    x.title = 'Remove image';
+    x.title = 'Remove ' + what;
     x.style.cssText = 'position:absolute;top:-4px;right:-4px;width:18px;height:18px;padding:0;border:0;' +
       'border-radius:50%;background:#b3261e;color:#fff;font:11px/18px sans-serif;cursor:pointer;';
     x.addEventListener('mousedown', (e) => e.preventDefault());
@@ -179,39 +200,149 @@
       if (el.isConnected && !hasPending(el)) stripZw(el);
       el.focus();
     });
-    item.node.append(img, x);
+    item.node.append(content, x);
     tray.box.appendChild(item.node);
     tray.items.push(item);
     placeTray();
+    return item;
   }
-  async function attachImages(el, files, verb) {
-    try {
-      const done = [];
-      for (const f of files) done.push({ f, marker: '[pasted image: ' + (await upload(f)) + ']' });
-      if (tray.el !== el) { for (const i of [...tray.items]) dropThumb(i); tray.el = el; }
-      for (const d of done) addThumb(el, d.f, d.marker);
-      el.focus();
-      keepSendable(el);
-      toast(`Image ${verb}: ` + done.map((d) => d.marker.slice(15, -1).split('/').pop()).join(', '));
-    } catch (e) {
-      toast(`Image ${verb === 'saved' ? 'paste' : 'drop'} failed: ` + e.message, true);
+  function addThumb(el, file, marker) {
+    const item = { marker, sent: false, url: URL.createObjectURL(file), node: document.createElement('div') };
+    const img = new Image();
+    img.src = item.url;
+    img.title = marker.slice(15, -1).split('/').pop();
+    img.style.cssText = 'display:block;height:56px;max-width:120px;object-fit:cover;border-radius:4px;background:#fff;';
+    return addItem(el, item, img, 'image');
+  }
+  function addChip(el, text, title, marker, what) {
+    const item = { marker, sent: false, node: document.createElement('div'), label: document.createElement('div') };
+    item.label.textContent = text;
+    item.label.title = title;
+    item.label.style.cssText = 'height:56px;line-height:56px;padding:0 12px;max-width:260px;overflow:hidden;white-space:nowrap;' +
+      'text-overflow:ellipsis;border-radius:4px;background:rgba(255,255,255,.14);color:#fff;font:12px/56px sans-serif;';
+    return addItem(el, item, item.label, what);
+  }
+  async function attachFiles(el, files, verb) {
+    const done = [];
+    for (const f of files) {
+      const img = TYPES.includes(f.type);
+      if (f.size > MAX_FILE) { toast(`${f.name} is larger than 100 MB`, true); continue; }
+      try {
+        const path = (await upload(f)).path;
+        done.push({ f, img, path, marker: img ? `[pasted image: ${path}]` : `[attached file: ${path}]` });
+      } catch (e) {
+        toast((img ? `Image ${verb === 'saved' ? 'paste' : 'drop'} failed: ` : 'Attach failed: ') + e.message, true);
+      }
     }
+    if (!done.length) return;
+    useTray(el);
+    for (const d of done) {
+      if (d.img) addThumb(el, d.f, d.marker);
+      else addChip(el, `\u{1F4C4} ${d.f.name} \u00B7 ${human(d.f.size)}`, d.path, d.marker, 'file');
+    }
+    el.focus();
+    keepSendable(el);
+    const names = done.map((d) => d.img ? d.path.split('/').pop() : d.f.name).join(', ');
+    toast((done.every((d) => d.img) ? `Image ${verb}: ` : 'Attached: ') + names);
+  }
+  const readAll = (reader) => new Promise((res, rej) => {
+    const all = [];
+    const next = () => reader.readEntries((batch) => {
+      if (!batch.length) return res(all);
+      all.push(...batch);
+      next();
+    }, rej);
+    next();
+  });
+  async function walk(entry, prefix, out) {
+    const rel = prefix ? prefix + '/' + entry.name : entry.name;
+    if (out.length > MAX_FILES) return out;
+    if (entry.isFile) out.push({ file: await new Promise((res, rej) => entry.file(res, rej)), rel });
+    else if (entry.isDirectory) for (const e of await readAll(entry.createReader())) await walk(e, rel, out);
+    return out;
+  }
+  async function attachFolder(el, dir) {
+    const name = dir.name;
+    useTray(el);
+    const item = addChip(el, `\u{1F4C1} ${name} \u00B7 scanning\u2026`, name, '', 'folder');
+    item.busy = true;
+    keepSendable(el);
+    const label = (s) => { item.label.textContent = `\u{1F4C1} ${name} \u00B7 ${s}`; };
+    const live = () => tray.items.includes(item);
+    const fail = (msg) => {
+      if (!live()) return;
+      dropThumb(item);
+      toast('Attach failed: ' + msg, true);
+      if (el.isConnected && !hasPending(el)) stripZw(el);
+    };
+    try {
+      const all = await walk(dir, '', []);
+      if (all.length > MAX_FILES) return fail(`${name} has more than ${MAX_FILES} files`);
+      if (all.reduce((n, f) => n + f.file.size, 0) > MAX_DIR) return fail(`${name} is larger than 1 GB`);
+      const files = all.filter(({ file }) => {
+        if (file.size <= MAX_FILE) return true;
+        toast(`${file.name} is larger than 100 MB`, true);
+        return false;
+      });
+      if (!files.length) return fail(`${name} has no files to upload`);
+      const total = files.reduce((n, f) => n + f.file.size, 0);
+      const batch = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+      const queue = [...files];
+      let count = 0;
+      let folder = '';
+      label(`0/${files.length}\u2026`);
+      const worker = async () => {
+        while (queue.length && live()) {
+          const { file, rel } = queue.shift();
+          const j = await upload(file, { 'X-Batch': batch, 'X-Rel-Path': encodeURIComponent(rel) });
+          folder = folder || j.folder || '';
+          if (live()) label(`${++count}/${files.length}\u2026`);
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(4, files.length) }, worker));
+      if (!live()) return;
+      if (!folder) return fail('server did not report the folder path');
+      item.marker = `[attached folder: ${folder}]`;
+      item.busy = false;
+      item.label.title = folder;
+      label(`${files.length} files \u00B7 ${human(total)}`);
+      toast(`Folder attached: ${name} (${files.length} files)`);
+    } catch (e) {
+      fail(e.message);
+    }
+  }
+  function grab(dt) {
+    const out = [];
+    for (const i of [...(dt.items || [])]) {
+      if (i.kind !== 'file') continue;
+      const entry = i.webkitGetAsEntry ? i.webkitGetAsEntry() : null;
+      if (entry && entry.isDirectory) out.push({ dir: entry });
+      else {
+        const f = i.getAsFile();
+        if (f) out.push({ file: f });
+      }
+    }
+    if (!out.length) for (const f of [...(dt.files || [])]) out.push({ file: f });
+    return out;
+  }
+  function take(el, got, verb) {
+    const files = got.filter((g) => g.file).map((g) => g.file);
+    if (files.length) attachFiles(el, files, verb);
+    for (const g of got) if (g.dir) attachFolder(el, g.dir);
   }
   window.addEventListener('paste', (ev) => {
     const el = document.activeElement;
     const dt = ev.clipboardData;
     if (!dt || !isEditable(el)) return;
     if ((dt.getData('text/plain') || '').trim()) return;
-    const files = [...dt.items]
-      .filter((i) => i.kind === 'file' && TYPES.includes(i.type))
-      .map((i) => i.getAsFile())
-      .filter(Boolean);
-    if (!files.length) return;
+    const got = grab(dt);
+    if (!got.length) return;
     ev.preventDefault();
     ev.stopImmediatePropagation();
-    attachImages(el, files, 'saved');
+    take(el, got, 'saved');
   }, true);
-  const draggingImages = (dt) => !!dt && [...(dt.items || [])].some((i) => i.kind === 'file' && TYPES.includes(i.type));
+  const draggingFiles = (dt) => !!dt &&
+    ([...(dt.types || [])].includes('Files') || [...(dt.items || [])].some((i) => i.kind === 'file'));
   const composer = (target) => {
     if (isEditable(target)) return target;
     if (isEditable(document.activeElement)) return document.activeElement;
@@ -220,7 +351,7 @@
   let dropHint = null;
   const hideHint = () => { if (dropHint) dropHint.style.display = 'none'; };
   window.addEventListener('dragover', (ev) => {
-    if (!draggingImages(ev.dataTransfer)) return;
+    if (!draggingFiles(ev.dataTransfer)) return;
     ev.preventDefault();
     ev.dataTransfer.dropEffect = 'copy';
     const el = composer(ev.target);
@@ -228,7 +359,7 @@
     if (!dropHint) {
       dropHint = document.createElement('div');
       dropHint.setAttribute('data-ca-img-root', '');
-      dropHint.textContent = 'Drop image to attach';
+      dropHint.textContent = 'Drop files or folders to attach';
       dropHint.style.cssText = 'position:fixed;z-index:2147483644;pointer-events:none;border:2px dashed #4fc3f7;' +
         'border-radius:8px;background:rgba(79,195,247,.12);color:#4fc3f7;font:600 13px sans-serif;' +
         'display:flex;align-items:center;justify-content:center;';
@@ -241,15 +372,15 @@
   window.addEventListener('drop', (ev) => {
     hideHint();
     const dt = ev.dataTransfer;
-    if (!draggingImages(dt)) return;
+    if (!draggingFiles(dt)) return;
     ev.preventDefault();
     ev.stopImmediatePropagation();
     const el = composer(ev.target);
-    if (!el) return toast('Image drop failed: chat box not found', true);
-    const files = [...dt.files].filter((f) => TYPES.includes(f.type));
-    if (!files.length) return toast('Image drop failed: only PNG, JPEG, GIF or WebP files', true);
+    if (!el) return toast('Attach failed: chat box not found', true);
+    const got = grab(dt);
+    if (!got.length) return toast('Attach failed: nothing to attach', true);
     el.focus();
-    attachImages(el, files, 'attached');
+    take(el, got, 'attached');
   }, true);
   const DIR = window.__CA_GEN_DIR || '';
   const SVG2IMG = window.__CA_SVG2IMG || '';
@@ -292,8 +423,7 @@
       if (!hasPending(el)) return;
       ev.preventDefault();
       ev.stopImmediatePropagation();
-      attachPending(el);
-      return resend(() => pressEnter(el));
+      return sendWhenReady(el, () => pressEnter(el));
     }
     ev.preventDefault();
     ev.stopImmediatePropagation();
@@ -304,8 +434,7 @@
     const out = fmt === 'svg' ? '' : `${base}.${fmt}`;
     const name = (out || `${base}.svg`).split('/').pop();
     replaceAll(el, imageRequest(m[2], `${base}.svg`, out));
-    if (hasPending(el)) attachPending(el);
-    resend(() => {
+    sendWhenReady(el, () => {
       pressEnter(el);
       toast('Image requested: ' + name + ' (press Enter if it was not sent)');
     });
@@ -315,23 +444,23 @@
     if (bypassEnter || !(form instanceof HTMLFormElement) || !tray.el || !form.contains(tray.el) || !hasPending(tray.el)) return;
     ev.preventDefault();
     ev.stopImmediatePropagation();
-    attachPending(tray.el);
     const by = ev.submitter && form.contains(ev.submitter) ? ev.submitter : undefined;
-    resend(() => form.requestSubmit(by));
+    sendWhenReady(tray.el, () => form.requestSubmit(by));
   }, true);
   window.addEventListener('click', (ev) => {
     const btn = ev.target instanceof Element && ev.target.closest('.hub-background-action');
     if (bypassEnter || !btn || !hasPending(tray.el)) return;
     ev.preventDefault();
     ev.stopImmediatePropagation();
-    attachPending(tray.el);
-    resend(() => btn.click());
+    sendWhenReady(tray.el, () => btn.click());
   }, true);
   const IMG_EXT = /\.(?:svg|png|jpe?g|gif|webp)$/i;
   const IMG_HINT = /\.(?:svg|png|jpe?g|gif|webp)\b/i;
   const GEN_NAME = /(?:^|[\\/])(?:gen|paste)_\d{8}_\d{6}_\d{3}\.\w+$/i;
   const BLOCK = 'p,li,pre,td,blockquote,h1,h2,h3,h4,h5,h6,div';
   const MARK = /\[pasted image: ([^\]\n]+?\.(?:png|jpe?g|gif|webp))\]\s?/gi;
+  const FMARK = /\[attached (file|folder): ([^\]\n]+)\]\s?/g;
+  const FMARK_HINT = /\[attached (?:file|folder): /;
   const SKIP = '[data-ca-img-root],textarea,input,script,style,[contenteditable="true"],[contenteditable=""]';
   const loaded = new Set();
   function lightbox(src, name) {
@@ -397,6 +526,24 @@
     if ([...host.children].some((c) => c.dataset && c.dataset.caImg === key)) return;
     host.appendChild(preview(file));
   }
+  const leaf = (p) => p.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || p;
+  function chip(n, kind, path) {
+    const host = n.parentElement.closest(BLOCK) || n.parentElement;
+    const key = kind + ':' + path;
+    if ([...host.querySelectorAll('[data-ca-file]')].some((c) => c.dataset.caFile === key)) return;
+    const c = document.createElement('span');
+    c.setAttribute('data-ca-img-root', '');
+    c.dataset.caFile = key;
+    c.textContent = (kind === 'file' ? '\u{1F4C4} ' : '\u{1F4C1} ') + leaf(path);
+    c.title = path;
+    c.style.cssText = 'display:inline-flex;align-items:center;padding:2px 8px;border-radius:10px;' +
+      'background:rgba(127,127,127,.18);font-size:12px;margin:2px;' + (kind === 'file' ? 'cursor:pointer;' : '');
+    if (kind === 'file') {
+      c.addEventListener('click', () => window.open('/__file?path=' + encodeURIComponent(path) +
+        '&token=' + encodeURIComponent(token()), '_blank', 'noopener'));
+    }
+    n.parentNode.insertBefore(c, n);
+  }
   function scan() {
     for (const a of document.querySelectorAll('a[href]')) {
       if (a.closest(SKIP)) continue;
@@ -406,7 +553,8 @@
     const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
       acceptNode(n) {
         const p = n.parentElement;
-        if (!p || p.closest(SKIP) || !IMG_HINT.test(n.nodeValue)) return NodeFilter.FILTER_REJECT;
+        const v = n.nodeValue;
+        if (!p || p.closest(SKIP) || !(IMG_HINT.test(v) || FMARK_HINT.test(v))) return NodeFilter.FILTER_REJECT;
         const a = p.closest('a[href]');
         return a && linkPath(a) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT;
       },
@@ -414,6 +562,11 @@
     const hits = [];
     while (walker.nextNode()) hits.push(walker.currentNode);
     for (const n of hits) {
+      const files = [...n.nodeValue.matchAll(FMARK)];
+      if (files.length) {
+        for (const m of files) chip(n, m[1], m[2].trim());
+        n.nodeValue = n.nodeValue.replace(FMARK, '');
+      }
       MARK.lastIndex = 0;
       const marks = [...n.nodeValue.matchAll(MARK)];
       if (marks.length) {

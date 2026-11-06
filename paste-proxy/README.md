@@ -25,9 +25,19 @@ inline image previews.
 - In sent messages, the `[pasted image: <path>]` text is hidden and only the
   thumbnail is shown. The full path is still in the message the agent gets.
 - Pastes that contain plain text are left alone.
-- Drag and drop: drop PNG/JPEG/GIF/WebP files anywhere on the page. A dashed
-  "Drop image to attach" outline marks the chat box, and the files are saved
-  and inserted exactly like a paste. The browser never opens the dropped file.
+- Drag and drop: drop files or folders anywhere on the page. A dashed
+  "Drop files or folders to attach" outline marks the chat box, and the files
+  are saved and inserted exactly like a paste. The browser never opens the
+  dropped file.
+- Any file type can be pasted or dropped. PNG/JPEG/GIF/WebP images get a
+  thumbnail and `[pasted image: <path>]`; other files get a `📄 name · size`
+  chip and `[attached file: <path>]`, saved to `screens/attachments/`.
+- Folders are uploaded file by file with their sub-folders (4 at a time, with
+  progress on the chip) to `screens/attachments/<time>_<folder>/`, and the
+  message gets `[attached folder: <path>]`. Sending waits until the folder
+  is fully uploaded.
+- In sent messages, file and folder markers become chips. Clicking a file
+  chip downloads it through `/__file`.
 - Thumbnails: each attached image is shown in a strip above the chat box.
   ✕ removes the image from the message (the saved file stays
   in `screens/`). The strip clears when the message is sent.
@@ -110,17 +120,61 @@ Use that link (port 4300), not the upstream port.
 | `CHIPAGENTS_BIN` | `~/.local/bin/chipagents` |
 | `PASTE_NO_BROWSER` | unset (`1` disables auto-open) |
 | `PREVIEW_ROOTS` | unset (extra preview roots, `:`-separated) |
+| `CONV_DIR` | `<Desktop>/ChipAgents Conversations` (set by `start.sh`; `<cwd>/ChipAgents Conversations` if run directly) |
+| `CONV_SYNC` | on (`0` turns conversation folders off) |
+| `CONV_FILE_MAX_MB` | `100` (larger files are listed, not copied) |
+| `CONV_TOTAL_MAX_MB` | `2000` per conversation folder |
+| `UPLOAD_MAX_MB` | `100` per pasted/dropped file |
 
-## Presentation
+## Conversation folders
 
-`presentation/ChipAgents_Web_Image_Paste.pptx` is a 10-slide ADI-branded deck
-covering the problem, architecture, paste flow, UID check, security,
-verification, usage and limits. Regenerate it with
-`python3 presentation/make_deck.py`.
+While the launcher runs, every conversation gets its own folder, updated
+after each message and reply (every ~10 s while the agent is working):
+
+```
+Desktop/ChipAgents Conversations/
+  index.json                         thread id -> folder name
+  2026-11-06_<title>_<id8>/
+    conversation.md                  readable history, images inline,
+                                     tool calls collapsible, Files table
+    conversation.json                full raw data from the hub
+    attachments/                     what you pasted or dropped
+    generated/                       images the agent generated
+    files/C/Users/.../file.vb        copies of files the agent read,
+    files/home/<user>/.../file.py    created or edited (original path mirrored)
+```
+
+- **Source:** the proxy reads `/hub/api/runs` every 5 s with the launch
+  token and syncs every conversation whose `updatedAt` changed. Opening an
+  older conversation in the hub also syncs it, so it gets a folder too. The
+  first open of an old conversation can take ~30 s while the hub downloads it.
+- **Files** come from the tool calls (View, Edit, ExtractPdf, spreadsheet,
+  waveform, Lint, Plot, ...), from paths in Bash/RunToolProgram commands
+  (only existing files under `/mnt/<drive>`, `/home`, `/root`), and from
+  the markers in your messages. Copies are refreshed when the original
+  changes. Originals are never moved or modified.
+- **Not copied:** files that look like secrets (`credentials.json`,
+  `*.pem`, `*.key`, `id_rsa*`, `.env`, `.git-credentials`, `~/.ssh`),
+  `/proc`, `/sys`, `/dev`, files over `CONV_FILE_MAX_MB` and anything
+  past `CONV_TOTAL_MAX_MB` per folder. They are listed in the Files table
+  with the reason.
+- The folder name uses the hub's title. A folder created before the hub
+  chose a title is renamed once when the real title arrives.
+- Temporary conversations are not saved.
+- Files touched only by a subagent are not visible in the transcript and are
+  not copied. Paths reached indirectly by shell commands (globs, `cd` plus a
+  relative name) can be missed.
+- It relies on the hub's internal API (checked on 0.44.3). If the API stops
+  answering, the launcher logs `[conversations] sync disabled` and paste keeps
+  working.
 
 ## Limits
 
-- Upload limit is 25 MB per image.
+- Upload limit is `UPLOAD_MAX_MB` (100 MB) per file; folders up to 2000
+  files and 1 GB. Image previews are shown for images up to 25 MB.
+- `/__file` (chip downloads) needs the hub token, only serves files under the
+  same folders as `/__img` plus the conversations folder, and refuses files
+  that look like secrets.
 - Uploads require the `X-ChipAgents-Paste: 1` header and a loopback origin
   on the proxy port.
 - The page script picks up the hub token from the hub's own requests
