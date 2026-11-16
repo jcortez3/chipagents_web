@@ -1,19 +1,21 @@
 @echo off
 setlocal
-set WORKDIR=/mnt/c/Users/jcortez3/Desktop
+set "CA_APP=%~dp0"
+set "CA_DESKTOP="
+for /f "usebackq delims=" %%D in (`powershell -NoProfile -Command "[Environment]::GetFolderPath('Desktop')"`) do set "CA_DESKTOP=%%D"
+if not defined CA_DESKTOP set "CA_DESKTOP=%USERPROFILE%\Desktop"
+set "WSLENV=CA_APP/p:CA_DESKTOP/p:%WSLENV%"
 set PORT=
 
 echo Looking for a free port ...
-set HELPER=/mnt/c/Users/jcortez3/Desktop/chiagents\ web/ca-freeport.sh
-for /f "delims=" %%p in ('wsl.exe -- bash -lc "bash %HELPER% 4242 4299"') do set PORT=%%p
+for /f "delims=" %%p in ('wsl.exe -- bash -lc "bash \"$CA_APP/ca-freeport.sh\" 4242 4299"') do set PORT=%%p
 
 if "%PORT%"=="" goto :noport
 if "%PORT%"=="none" goto :noport
 
 echo Starting ChipAgents web on port %PORT% ...
 start "" http://localhost:%PORT%/hub
-wsl.exe -- bash -lc "cd %WORKDIR% && export NODE_EXTRA_CA_CERTS=$HOME/certs/adi-ca-bundle.pem && export CHIPAGENTS_DISABLE_UID_CHECK=true && HUB_PORT=%PORT% ~/.local/bin/chipagents web"
-CHIPAGENTS_DISABLE_UID_CHECK=true
+wsl.exe -- bash -lc "cd \"$CA_DESKTOP\" && export NODE_EXTRA_CA_CERTS=$HOME/certs/adi-ca-bundle.pem && export CHIPAGENTS_DISABLE_UID_CHECK=true && HUB_PORT=%PORT% ~/.local/bin/chipagents web"
 goto :done
 
 :noport
