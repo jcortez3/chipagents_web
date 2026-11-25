@@ -11,19 +11,6 @@ if [ ! -d "$desktop" ]; then
   say "Desktop folder not found: $desktop"
   exit 1
 fi
-if ! command -v node >/dev/null 2>&1; then
-  say "Node.js was not found in WSL. Install Node.js 18 or newer, then try again."
-  exit 1
-fi
-chipagents_bin="${CHIPAGENTS_BIN:-$HOME/.local/bin/chipagents}"
-if [ ! -x "$chipagents_bin" ]; then
-  chipagents_bin="$(command -v chipagents || true)"
-fi
-if [ -z "$chipagents_bin" ]; then
-  say "ChipAgents CLI was not found in WSL. Install it and log in first (chipagents login)."
-  exit 1
-fi
-export CHIPAGENTS_BIN="$chipagents_bin"
 export_ca() {
   local out="$1" tmp ps enc
   ps='$c = foreach($s in @("Cert:\LocalMachine\Root","Cert:\LocalMachine\CA","Cert:\CurrentUser\Root","Cert:\CurrentUser\CA")){ Get-ChildItem $s -ErrorAction SilentlyContinue }; $c | Where-Object { $_.Subject -match "Analog|goskope|Netskope" -and $_.Subject -notmatch "EFS" } | Sort-Object Thumbprint -Unique | ForEach-Object { "# " + $_.Subject; "-----BEGIN CERTIFICATE-----"; [Convert]::ToBase64String($_.RawData,"InsertLineBreaks"); "-----END CERTIFICATE-----" }'
@@ -54,6 +41,27 @@ if [ -z "${NODE_EXTRA_CA_CERTS:-}" ]; then
     say "warning: could not export ADI certificates; logins may fail with 'self signed certificate in certificate chain'"
   fi
 fi
+if ! command -v node >/dev/null 2>&1; then
+  say "Node.js was not found in WSL. Install Node.js 18 or newer (Ubuntu 24.04: sudo apt install -y nodejs), then try again."
+  exit 1
+fi
+chipagents_bin="${CHIPAGENTS_BIN:-$HOME/.local/bin/chipagents}"
+if [ ! -x "$chipagents_bin" ]; then
+  chipagents_bin="$(command -v chipagents || true)"
+fi
+if [ -z "$chipagents_bin" ]; then
+  say "ChipAgents CLI was not found in WSL. Install it and log in with these commands in WSL, then try again:"
+  if [ -n "${NODE_EXTRA_CA_CERTS:-}" ] && [ -f /etc/ssl/certs/ca-certificates.crt ]; then
+    mkdir -p "$HOME/certs"
+    cat /etc/ssl/certs/ca-certificates.crt "$NODE_EXTRA_CA_CERTS" > "$HOME/certs/ca-all.pem" && chmod 644 "$HOME/certs/ca-all.pem"
+    echo "  export CURL_CA_BUNDLE=\$HOME/certs/ca-all.pem NODE_EXTRA_CA_CERTS=$NODE_EXTRA_CA_CERTS"
+  fi
+  echo "  curl -LsSf https://chipagentssrv.engawsus1.analog.com/agent/install.sh | bash"
+  echo "  ~/.local/bin/chipagents login"
+  exit 1
+fi
+export CHIPAGENTS_BIN="$chipagents_bin"
+export UV_USE_IO_URING=0
 bash "$APP_DIR/stop-old.sh"
 export PASTE_DIR="${PASTE_DIR:-$desktop/screens}"
 export CONV_DIR="${CONV_DIR:-$desktop/ChipAgents Conversations}"
