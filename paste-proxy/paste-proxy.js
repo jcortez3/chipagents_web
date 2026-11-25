@@ -261,7 +261,7 @@ async function handleUpload(req, res) {
   }
   await fs.promises.mkdir(path.dirname(target.file), { recursive: true });
   const part = `${target.file}.part-${process.pid}`;
-  const out = fs.createWriteStream(part);
+  const out = fs.createWriteStream(part, { start: 0 });
   let size = 0;
   let failed = false;
   const fail = (code, msg) => {
