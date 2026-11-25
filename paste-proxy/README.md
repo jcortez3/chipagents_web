@@ -92,6 +92,9 @@ Downloads. No paths are tied to one user. Each PC needs:
   For the `chipagents` CLI outside the launcher (for example
   `chipagents login`), add
   `export NODE_EXTRA_CA_CERTS=$HOME/certs/adi-ca-bundle.pem` to `~/.bashrc`.
+- ChipAgents settings: if `~/.chipagents/config.toml` does not exist,
+  `start.sh` copies `paste-proxy/chipagents-config.toml` there (ADI server
+  `endpoint_url` and `auto_update`). An existing config is never changed.
 
 The launcher finds its own folder (`%~dp0`) and the logged-in user's Desktop
 (`[Environment]::GetFolderPath('Desktop')`, which handles OneDrive

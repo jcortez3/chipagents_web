@@ -41,6 +41,11 @@ if [ -z "${NODE_EXTRA_CA_CERTS:-}" ]; then
     say "warning: could not export ADI certificates; logins may fail with 'self signed certificate in certificate chain'"
   fi
 fi
+if [ ! -f "$HOME/.chipagents/config.toml" ] && [ -f "$APP_DIR/chipagents-config.toml" ]; then
+  mkdir -p "$HOME/.chipagents"
+  cp "$APP_DIR/chipagents-config.toml" "$HOME/.chipagents/config.toml"
+  say "created ~/.chipagents/config.toml with the ADI ChipAgents server settings"
+fi
 if ! command -v node >/dev/null 2>&1; then
   say "Node.js was not found in WSL. Install Node.js 18 or newer (Ubuntu 24.04: sudo apt install -y nodejs), then try again."
   exit 1
