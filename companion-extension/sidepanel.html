@@ -1,0 +1,65 @@
+<!-- jcortez3 -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>ChipAgents Companion</title>
+<link rel="stylesheet" href="sidepanel.css">
+</head>
+<body>
+<header>
+  <div class="row">
+    <button id="share" class="chip" title="Share this tab: every message you send also gets the page you are viewing (only when it changed)">
+      <span class="dot"></span><span id="shareLabel">Not sharing</span>
+    </button>
+    <span id="tabTitle" class="tab"></span>
+  </div>
+  <div class="row tools">
+    <button id="talk" class="big" title="Start or stop a voice conversation (Alt+T)">🎙</button>
+    <button id="askTab" title="Ask about this tab (page text). Uses the question typed in the hub box, or asks for a summary">📄</button>
+    <button id="askSel" title="Ask about the text selected on the page">✂</button>
+    <button id="askShot" title="Ask about a screenshot of this tab">📸</button>
+    <button id="autoRead" title="Read replies aloud">🔊</button>
+    <button id="readLast" title="Read the last reply aloud (Alt+R)">▶</button>
+    <button id="stop" title="Stop speaking (Esc). In a voice conversation it lets you talk right away">⏹</button>
+    <span class="grow"></span>
+    <button id="popout" title="Open in a separate window">⧉</button>
+    <button id="settings" title="Settings">⚙</button>
+  </div>
+  <div id="status" class="status"></div>
+  <div id="micBanner" class="banner" hidden>
+    The microphone needs a one-time permission.
+    <button id="micGrant">Enable microphone</button>
+  </div>
+</header>
+<main>
+  <iframe id="hub" allow="microphone; clipboard-read; clipboard-write" title="ChipAgents hub"></iframe>
+  <section id="setup" class="setup" hidden>
+    <h2 id="setupTitle">Connect to ChipAgents Web</h2>
+    <p id="setupText"></p>
+    <ol>
+      <li>Run <b>chipagents-web-paste.bat</b> (in the <i>chiagents web</i> folder).</li>
+      <li>Open the link it prints (<code>http://localhost:4300/hub?token=…</code>) once in this browser. The companion picks it up by itself.</li>
+    </ol>
+    <p>Or paste the link here:</p>
+    <div class="row"><input id="setupUrl" placeholder="http://localhost:4300/hub?token=..."><button id="setupSave">Connect</button></div>
+    <p><button id="setupRetry">Retry</button></p>
+  </section>
+</main>
+<dialog id="dlg">
+  <form method="dialog">
+    <h3>Settings</h3>
+    <label>Hub link<input id="sUrl" placeholder="http://localhost:4300/hub?token=..."></label>
+    <label>Reply voice<select id="sVoice"></select></label>
+    <label>Speaking speed <span id="sRateV"></span><input id="sRate" type="range" min="0.7" max="1.6" step="0.05"></label>
+    <label>Speech language<input id="sLang" placeholder="en-US"></label>
+    <label>Pause before sending (ms)<input id="sPause" type="number" min="600" max="5000" step="100"></label>
+    <label class="check"><input id="sBrief" type="checkbox"> Ask for short spoken answers in voice conversations</label>
+    <label class="check"><input id="sAuto" type="checkbox"> Read replies to typed messages aloud</label>
+    <p class="hint">Voice input uses the browser's speech service (audio goes to Google or Microsoft). Voices marked "online" send reply text to Microsoft or Google too; offline voices stay on this PC.</p>
+    <div class="row end"><button id="sMic" type="button">Enable microphone</button><button value="cancel">Cancel</button><button id="sSave" value="save">Save</button></div>
+  </form>
+</dialog>
+<script src="sidepanel.js"></script>
+</body>
+</html>
