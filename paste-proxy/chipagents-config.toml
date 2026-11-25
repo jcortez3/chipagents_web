@@ -1,0 +1,4 @@
+# Default ChipAgents settings for new users. start.sh copies this file to
+# ~/.chipagents/config.toml only when that file does not exist yet.
+endpoint_url = "https://chipagentssrv.engawsus1.analog.com/agent"
+auto_update = true
