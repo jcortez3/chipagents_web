@@ -1,3 +1,4 @@
+// jcortez3
 (() => {
   if (window.__chipagentsPasteInstalled) return;
   window.__chipagentsPasteInstalled = true;
@@ -350,7 +351,9 @@
   };
   let dropHint = null;
   const hideHint = () => { if (dropHint) dropHint.style.display = 'none'; };
+  const inSkills = (ev) => ev.target instanceof Element && !!ev.target.closest('[data-ca-skills]');
   window.addEventListener('dragover', (ev) => {
+    if (inSkills(ev)) return hideHint();
     if (!draggingFiles(ev.dataTransfer)) return;
     ev.preventDefault();
     ev.dataTransfer.dropEffect = 'copy';
@@ -371,6 +374,7 @@
   window.addEventListener('dragleave', (ev) => { if (!ev.relatedTarget) hideHint(); }, true);
   window.addEventListener('drop', (ev) => {
     hideHint();
+    if (inSkills(ev)) return;
     const dt = ev.dataTransfer;
     if (!draggingFiles(dt)) return;
     ev.preventDefault();
@@ -413,6 +417,7 @@
       try { fn(); } finally { bypassEnter = false; }
     }, 60);
   }
+  window.__caPasteApi = { token, toast, human, walk, readAll };
   const pressEnter = (el) => el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }));
   window.addEventListener('keydown', (ev) => {
     if (bypassEnter || ev.key !== 'Enter' || ev.shiftKey || ev.ctrlKey || ev.altKey || ev.metaKey || ev.isComposing) return;
@@ -627,6 +632,10 @@
       `\nChecked ${checked}. Click to check again.`;
     ver.box.appendChild(pillEl('v' + (i.current || '?'), tip, 'background:rgba(127,127,127,.18);color:inherit;opacity:.85;',
       () => refreshVersion(true, true)));
+    if (typeof window.__caSkillsOpen === 'function') {
+      ver.box.appendChild(pillEl('\u{1F9E9} Skills', 'Import, install, update and share skills',
+        'background:rgba(21,101,192,.85);color:#fff;', window.__caSkillsOpen));
+    }
     const j = i.job;
     if (inFlight(j)) {
       ver.box.appendChild(pillEl(`Updating to ${j.to}: ${PHASES[j.phase] || j.phase}`, 'The hub restarts and this tab reloads by itself.',
