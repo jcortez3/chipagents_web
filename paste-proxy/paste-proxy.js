@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// jcortez3
 'use strict';
 const http = require('http');
 const net = require('net');
@@ -8,8 +9,9 @@ const crypto = require('crypto');
 const { spawn, execFile } = require('child_process');
 const conversations = require('./conversations');
 const { create: createUpdater, compare: compareVersions } = require('./updater');
+const skills = require('./skills');
 
-const BUILD = '2026-11-06b';
+const BUILD = '2026-11-26a';
 
 const PASTE_DIR = process.env.PASTE_DIR || path.join(process.cwd(), 'screens');
 const GEN_DIR = process.env.GEN_DIR || path.join(PASTE_DIR, 'generated_images');
@@ -40,6 +42,7 @@ const INJECT_JS = Buffer.concat([
   Buffer.from(`window.__CA_PASTE_BUILD=${JSON.stringify(BUILD)};window.__CA_GEN_DIR=${JSON.stringify(GEN_DIR)};\n`),
   Buffer.from(`window.__CA_SVG2IMG=${JSON.stringify(path.join(__dirname, 'svg2img.py'))};\n`),
   fs.readFileSync(path.join(__dirname, 'paste-inject.js')),
+  fs.readFileSync(path.join(__dirname, 'skills-ui.js')),
 ]);
 const TAG = '<script src="/__paste/inject.js"></script>';
 const URL_RE = /http:\/\/(localhost|127\.0\.0\.1):(\d+)(\/hub\S*)/;
@@ -371,6 +374,13 @@ function proxyHttp(req, res) {
   req.pipe(up);
 }
 
+const skillsHttp = skills.http({
+  core: skills.create({ workspacesJson: WORKSPACES_JSON, catalogFile: process.env.SKILL_CATALOG_FILE || path.join(__dirname, 'skill-catalog.json') }),
+  authorized,
+  originAllowed,
+  sendJson,
+});
+
 const server = http.createServer((req, res) => {
   const p = req.url.split('?')[0];
   if (p === '/__paste/inject.js') {
@@ -383,6 +393,7 @@ const server = http.createServer((req, res) => {
   if (p === '/__file') return void handleFile(req, res).catch(fail);
   if (p === '/__paste/version') return void handleVersion(req, res).catch(fail);
   if (p === '/__paste/update') return void handleUpdate(req, res).catch(fail);
+  if (p.startsWith('/__skills/')) return void skillsHttp(req, res, p).catch(fail);
   const run = req.method === 'GET' && /^\/hub\/api\/runs\/([\w-]{8,80})$/.exec(p);
   if (run && sync) sync.touch(run[1]);
   proxyHttp(req, res);

@@ -1,3 +1,4 @@
+# jcortez3
 # ChipAgents Web image-paste proxy (local workaround)
 
 ChipAgents Web v0.44.3 has no image paste in the chat box and does not show image
@@ -128,6 +129,7 @@ Use that link (port 4300), not the upstream port.
 | `CONV_FILE_MAX_MB` | `100` (larger files are listed, not copied) |
 | `CONV_TOTAL_MAX_MB` | `2000` per conversation folder |
 | `UPLOAD_MAX_MB` | `100` per pasted/dropped file |
+| `SKILL_CATALOG_FILE` | `paste-proxy/skill-catalog.json` (skill catalog sources) |
 
 ## Conversation folders
 
@@ -172,6 +174,82 @@ Desktop/ChipAgents Conversations/
 - It relies on the hub's internal API (checked on 0.44.3). If the API stops
   answering, the launcher logs `[conversations] sync disabled` and paste keeps
   working.
+
+## Skill importer
+
+The blue **🧩 Skills** pill next to the version opens the skill manager. It has
+three tabs:
+
+- **Import:** drop a `.zip`, `.tar.gz` or `.tgz` archive, a skill folder or a
+  single `SKILL.md` (or use **Choose file** / **Choose folder**). Each skill
+  found is checked and shown with its errors, warnings and scripts. Pick where
+  it goes, then click **Install**. An archive can hold several skills. A
+  `SKILL.md` can be at the top of the archive or up to three folders down.
+- **Catalog:** skills from the sources in `skill-catalog.json`. These can be
+  folders, or Git repos that are shallow-cloned and pulled with **⟳ Refresh**.
+  Each skill shows where it is already installed, marked ✓ for the same
+  version or ≠ for a different one, with **Install** or **⬆ Update**. By
+  default the catalog is the temporary `../skill-catalog` folder in this repo
+  (see its README).
+- **Installed:** every skill in every scope, with search and a scope filter.
+  - Badges mark invalid skills, auto-approve scripts, skills that override
+    each other, and skills with a catalog update.
+  - Row actions are **⬆ Update**, **⬇ Export .zip** (to share, for example on
+    Teams), **📤 Publish** (copy into the catalog folder), **↺ Backups** and
+    **🗑 Delete**.
+
+Scopes:
+
+| Scope | Folder |
+|---|---|
+| User (all workspaces) | `~/.chipagents/skills/<name>/` (or `$CHIPAGENTS_HOME/skills`) |
+| Workspace *X* | `<workspace root>/.chipagents/skills/<name>/` |
+
+A workspace skill takes the place of a user skill with the same name in that
+workspace.
+
+Checks done before installing:
+
+- `SKILL.md` needs frontmatter with a `name` (lowercase letters, digits,
+  `-`/`_`, max 64) and a `description`. The folder is installed as
+  `name`.
+- Rejected: symlinks, absolute paths or `..` in archives, encrypted zips,
+  more than 2000 files, or more than 200 MB unpacked. Sizes are counted while
+  unpacking, so zip bombs are stopped.
+- Removed: `__MACOSX`, `.DS_Store`, `Thumbs.db`, `.git` and
+  `__pycache__`.
+- Warnings: secret-looking files, the folder name differing from `name`, and
+  `auto-approve-scripts: true`. That last one needs an extra confirmation,
+  because its scripts run without asking.
+- If a skill with the same name already exists in the target scope, you are
+  asked before it is replaced.
+
+Install, update, restore and publish copy the skill to a temporary folder
+next to the target and then rename it into place, so a half-copied skill is
+never visible. The copy being replaced, or a deleted skill, is moved to
+`~/.chipagents/skill-importer/backups/<name>/<time>/`. The newest 5 per skill
+are kept, and **↺ Backups → Restore** puts one back into any scope.
+`~/.chipagents/skill-importer/` also holds the upload staging area (cleared
+after 1 h), the Git catalog cache and `installed.json` (where each skill came
+from).
+
+The importer never changes `enabled-skills.toml`. Turn skills on or off with
+`/skills` in a chat. New and changed skills apply to new chats, or type
+`/reload` in an open one.
+
+`skill-catalog.json` format (relative paths are relative to `paste-proxy/`;
+`"publish": false` stops a folder from being the publish target):
+
+```json
+[
+  { "name": "Local (temporary)", "path": "../skill-catalog" },
+  { "name": "Team share", "path": "/mnt/z/chipagents-skills", "publish": false },
+  { "name": "Team git", "git": "https://example.com/skills.git", "branch": "main" }
+]
+```
+
+Git uses the ADI CA bundle (`NODE_EXTRA_CA_CERTS`) plus the system CAs, and
+never prompts for a password.
 
 ## Version and updates
 
