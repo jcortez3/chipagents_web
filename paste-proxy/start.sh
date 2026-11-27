@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
+# jcortez3
 set -u
+main() {
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 say() { echo "[launcher] $*"; }
 desktop="${CA_DESKTOP:-}"
@@ -72,4 +74,13 @@ export PASTE_DIR="${PASTE_DIR:-$desktop/screens}"
 export CONV_DIR="${CONV_DIR:-$desktop/ChipAgents Conversations}"
 say "user: $(whoami), desktop: $desktop"
 cd "$desktop" || exit 1
-exec env HUB_PORT="${HUB_PORT:-4242}" PASTE_PROXY_PORT="${PASTE_PROXY_PORT:-4300}" node "$APP_DIR/paste-proxy.js"
+env HUB_PORT="${HUB_PORT:-4242}" PASTE_PROXY_PORT="${PASTE_PROXY_PORT:-4300}" node "$APP_DIR/paste-proxy.js"
+local code=$?
+if [ "$code" -eq 75 ]; then
+  say "ChipAgents Web was updated; starting the new version ..."
+  exec bash "$APP_DIR/start.sh"
+fi
+exit "$code"
+}
+main "$@"
+exit $?

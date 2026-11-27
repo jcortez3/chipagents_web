@@ -587,6 +587,11 @@
     'white-space:nowrap;vertical-align:middle;';
   const PHASES = { checking: 'checking…', downloading: 'downloading…', installing: 'installing…', restarting: 'restarting…' };
   const ver = { box: null, info: null, polling: false };
+  const tool = { info: null, polling: false, dialog: null };
+  const TOOL_PHASES = { checking: 'checking\u2026', downloading: 'downloading\u2026', 'backing up': 'backing up\u2026', installing: 'installing\u2026', restarting: 'restarting\u2026' };
+  const TOOL_CSS = 'background:#00796b;color:#fff;';
+  const short = (s) => (s ? String(s).slice(0, 7) : 'unknown');
+  const day = (d) => (d ? new Date(d).toLocaleDateString() : '');
   const inFlight = (j) => !!j && !['done', 'failed'].includes(j.phase);
   function versionHost() {
     for (const el of document.querySelectorAll('.hub-side-brand, button[aria-label="Show sidebar"]')) {
@@ -629,13 +634,15 @@
     const checked = i.checkedAt ? new Date(i.checkedAt).toLocaleTimeString() : 'never';
     const tip = `ChipAgents ${i.current || '?'}` + (i.installed && i.installed !== i.current ? ` (installed: ${i.installed})` : '') +
       `\nNewest on ${i.endpoint || 'server'}: ${i.latest || 'unknown' + (i.error ? ` (${i.error})` : '')}` +
+      (tool.info && tool.info.installed ? `\nChipAgents Web ${short(tool.info.installed.sha)}${tool.info.installed.date ? ` (${day(tool.info.installed.date)})` : ''}` : '') +
       `\nChecked ${checked}. Click to check again.`;
     ver.box.appendChild(pillEl('v' + (i.current || '?'), tip, 'background:rgba(127,127,127,.18);color:inherit;opacity:.85;',
-      () => refreshVersion(true, true)));
+      () => { void refreshVersion(true, true); void refreshTool(true, true); }));
     if (typeof window.__caSkillsOpen === 'function') {
       ver.box.appendChild(pillEl('\u{1F9E9} Skills', 'Import, install, update and share skills',
         'background:rgba(21,101,192,.85);color:#fff;', window.__caSkillsOpen));
     }
+    renderToolPill();
     const j = i.job;
     if (inFlight(j)) {
       ver.box.appendChild(pillEl(`Updating to ${j.to}: ${PHASES[j.phase] || j.phase}`, 'The hub restarts and this tab reloads by itself.',
@@ -654,6 +661,167 @@
     }
     ver.box.appendChild(pillEl(`⬆ Update to ${i.target}`, `Install ChipAgents ${i.target} and restart the hub`,
       'background:#2e7d32;color:#fff;font-weight:600;', startUpdate));
+  }
+  function renderToolPill() {
+    const t = tool.info;
+    if (!t || t.disabled) return;
+    const j = t.job;
+    if (inFlight(j)) {
+      ver.box.appendChild(pillEl(`Updating ChipAgents Web: ${TOOL_PHASES[j.phase] || j.phase}`, 'ChipAgents Web restarts and this tab reloads by itself.', TOOL_CSS));
+      return;
+    }
+    if (j && j.phase === 'failed') {
+      ver.box.appendChild(pillEl('ChipAgents Web update failed', j.error || 'unknown error', 'background:#b3261e;color:#fff;',
+        () => toast('ChipAgents Web update failed: ' + (j.error || 'unknown error'), true)));
+    }
+    if (!t.updateAvailable || t.dismissed) return;
+    const tip = `ChipAgents Web ${short(t.installed.sha)} \u2192 ${short(t.latest.sha)} (${day(t.latest.date)})` +
+      (t.ready ? '' : t.prefetchError ? `\nDownload failed: ${t.prefetchError}` : '\nDownloading in the background\u2026');
+    ver.box.appendChild(pillEl('\u2B06 ChipAgents Web update', tip, TOOL_CSS + 'font-weight:600;', openToolDialog));
+  }
+  async function refreshTool(force, byUser) {
+    try {
+      const r = await fetch('/__paste/tool-version' + (force ? '?refresh=1' : ''), { headers: { 'x-access-token': token() }, cache: 'no-store' });
+      if (!r.ok) return;
+      tool.info = await r.json();
+    } catch {
+      return;
+    }
+    if (ver.box) renderBadge();
+    const t = tool.info;
+    const j = t.job;
+    if (j && j.phase === 'done' && j.to) {
+      const key = 'ca-tool-updated-' + j.to;
+      try {
+        if (!sessionStorage.getItem(key)) {
+          sessionStorage.setItem(key, '1');
+          toast(`ChipAgents Web updated to ${short(j.to)}` + (j.companion ? '. Reload the ChipAgents Companion extension to use its update.' : ''));
+        }
+      } catch {
+        void 0;
+      }
+    }
+    if (byUser && !t.disabled && (t.error || (t.updateAvailable && !t.dismissed))) {
+      setTimeout(() => toast(t.error ? 'Could not check for ChipAgents Web updates: ' + t.error : 'A ChipAgents Web update is available', !!t.error), 1500);
+    }
+    if (inFlight(j)) void pollTool();
+  }
+  function openToolDialog() {
+    const t = tool.info;
+    if (!t || !t.latest || tool.dialog) return;
+    const el = (tag, css, text) => {
+      const e = document.createElement(tag);
+      if (css) e.style.cssText = css;
+      if (text != null) e.textContent = text;
+      return e;
+    };
+    const o = el('div', 'position:fixed;inset:0;z-index:2147483646;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;');
+    o.setAttribute('data-ca-img-root', '');
+    const box = el('div', 'width:min(560px,92vw);max-height:84vh;overflow:auto;background:#1e1f22;color:#e8e8e8;border-radius:10px;' +
+      'box-shadow:0 8px 30px rgba(0,0,0,.6);padding:16px 18px;font:13px/1.5 system-ui,sans-serif;');
+    o.appendChild(box);
+    const close = () => {
+      o.remove();
+      tool.dialog = null;
+      window.removeEventListener('keydown', onKey, true);
+    };
+    const onKey = (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } };
+    box.appendChild(el('div', 'font-size:16px;font-weight:600;margin-bottom:6px;', '\u2B06 ChipAgents Web update'));
+    box.appendChild(el('div', 'color:#a3a3a3;margin-bottom:10px;',
+      `Installed: ${short(t.installed.sha)}${t.installed.date ? ` (${day(t.installed.date)})` : ''}   \u2192   New: ${short(t.latest.sha)} (${day(t.latest.date)})`));
+    if (t.commits.length) {
+      box.appendChild(el('div', 'font-weight:600;margin-bottom:4px;', 'What changed'));
+      const ul = el('ul', 'margin:0 0 10px 18px;padding:0;');
+      for (const c of t.commits) ul.appendChild(el('li', 'margin:2px 0;', `${c.message}${c.date ? ` (${day(c.date)})` : ''}`));
+      if (t.more) ul.appendChild(el('li', 'margin:2px 0;color:#a3a3a3;', `\u2026and ${t.more} more`));
+      box.appendChild(ul);
+    } else if (t.latest.message) {
+      box.appendChild(el('div', 'margin-bottom:10px;', `Latest change: ${t.latest.message}`));
+    }
+    const note = (text, color) => box.appendChild(el('div', `margin:6px 0;color:${color || '#a3a3a3'};`, text));
+    if (t.status === 'unknown') note('The installed version is unknown (an older download), so every file is refreshed.', '#ffb74d');
+    if (t.companion) note('The ChipAgents Companion extension changed too. After the update, click Reload on its card in edge://extensions or chrome://extensions.', '#ffb74d');
+    if (!t.ready && t.prefetchError) note(`The background download failed (${t.prefetchError}). Update now tries again.`, '#ffb74d');
+    if (t.blocked) {
+      note(`This folder is a git checkout and ${t.blocked}, so it is not updated automatically. Update it with git pull.`, '#ffb74d');
+    } else {
+      note('Running conversations must finish first. ChipAgents Web restarts (about a minute) and this tab reloads by itself. ' +
+        'Your chats, settings, skills and catalog skills are kept, and the old files are backed up.');
+    }
+    const row = el('div', 'display:flex;gap:8px;justify-content:flex-end;margin-top:12px;');
+    const button = (label, css, fn) => {
+      const b = el('button', 'padding:6px 14px;border-radius:6px;border:0;font:inherit;cursor:pointer;color:#fff;' + css, label);
+      b.type = 'button';
+      b.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); fn(b); });
+      row.appendChild(b);
+      return b;
+    };
+    button('Later', 'background:rgba(255,255,255,.14);', async () => {
+      close();
+      try {
+        await fetch('/__paste/tool-update/dismiss?sha=' + encodeURIComponent(t.latest.sha), { method: 'POST', headers: { 'X-ChipAgents-Paste': '1', 'x-access-token': token() } });
+      } catch {
+        void 0;
+      }
+      toast('OK. You will be asked again when there is a newer update (or click the version to check).');
+      void refreshTool(false);
+    });
+    if (!t.blocked) button('Update now', TOOL_CSS + 'font-weight:600;', (b) => startToolUpdate(b, close));
+    box.appendChild(row);
+    o.addEventListener('mousedown', (e) => { if (e.target === o) close(); });
+    window.addEventListener('keydown', onKey, true);
+    document.body.appendChild(o);
+    tool.dialog = o;
+  }
+  async function startToolUpdate(b, close) {
+    b.disabled = true;
+    b.textContent = 'Starting\u2026';
+    let r;
+    let j = {};
+    try {
+      r = await fetch('/__paste/tool-update', { method: 'POST', headers: { 'X-ChipAgents-Paste': '1', 'x-access-token': token() } });
+      j = await r.json().catch(() => ({}));
+    } catch (e) {
+      j = { error: e.message };
+    }
+    if (!r || !r.ok) {
+      b.disabled = false;
+      b.textContent = 'Update now';
+      toast('ChipAgents Web update: ' + (j.error || 'HTTP ' + (r && r.status)), true);
+      return;
+    }
+    close();
+    tool.info.job = j.job;
+    renderBadge();
+    void pollTool();
+  }
+  async function pollTool() {
+    if (tool.polling) return;
+    tool.polling = true;
+    const until = Date.now() + 15 * 60000;
+    while (Date.now() < until) {
+      await new Promise((res) => setTimeout(res, 2000));
+      let j = null;
+      try {
+        const r = await fetch('/__paste/tool-update', { headers: { 'x-access-token': token() }, cache: 'no-store' });
+        if (r.ok) j = (await r.json()).job;
+      } catch {
+        j = null;
+      }
+      if (!j) continue;
+      tool.info.job = j;
+      renderBadge();
+      if (j.phase === 'done' && j.url) {
+        toast('ChipAgents Web updated. Reloading\u2026');
+        setTimeout(() => { location.href = j.url; }, 800);
+        return;
+      }
+      if (j.phase === 'failed') {
+        toast('ChipAgents Web update failed: ' + (j.error || 'unknown error'), true);
+        break;
+      }
+    }
+    tool.polling = false;
   }
   async function refreshVersion(force, byUser) {
     let r;
@@ -735,6 +903,8 @@
       if (!ver.info && n > 0) setTimeout(() => first(n - 1), 5000);
     });
     void first(12);
+    setTimeout(() => void refreshTool(false), 3000);
+    setInterval(() => void refreshTool(false), 30 * 60000);
     setInterval(() => void refreshVersion(false), 30 * 60000);
     setInterval(() => { if (ver.info) placeBadge(); }, 1500);
   }

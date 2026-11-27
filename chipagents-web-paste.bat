@@ -1,5 +1,10 @@
 @rem jcortez3
 @echo off
+if exist "%~dp0chipagents-web-paste.bat.new" (
+  move /y "%~dp0chipagents-web-paste.bat.new" "%~f0" >nul
+  "%~f0" %*
+  exit /b
+)
 setlocal
 set "CA_APP=%~dp0paste-proxy"
 set "CA_DESKTOP="

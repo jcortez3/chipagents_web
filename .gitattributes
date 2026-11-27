@@ -1,4 +1,6 @@
+# jcortez3
 *.sh text eol=lf
 *.js text eol=lf
 *.py text eol=lf
 *.bat -text
+paste-proxy/build-info.txt export-subst

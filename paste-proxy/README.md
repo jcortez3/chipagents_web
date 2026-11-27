@@ -130,6 +130,9 @@ Use that link (port 4300), not the upstream port.
 | `CONV_TOTAL_MAX_MB` | `2000` per conversation folder |
 | `UPLOAD_MAX_MB` | `100` per pasted/dropped file |
 | `SKILL_CATALOG_FILE` | `paste-proxy/skill-catalog.json` (skill catalog sources) |
+| `TOOL_UPDATE` | on (`0` turns the ChipAgents Web self-update off) |
+| `TOOL_UPDATE_REPO` / `TOOL_UPDATE_BRANCH` | `jcortez3/chipagents_web` / `main` |
+| `GITHUB_TOKEN` | unset (only needed past GitHub's 60 checks/hour limit) |
 
 ## Conversation folders
 
@@ -276,6 +279,43 @@ versions stay in `~/.chipagents/chipagents/`. To go back, re-point
 
 Shared installs (`CHIPAGENTS_INSTALL` set, or no write access) only show
 "x.y.z available"; your administrator updates those.
+
+## ChipAgents Web self-update
+
+This tool (the folder with `start.sh`) updates itself from the newest commit
+on `main` of `jcortez3/chipagents_web` (`tool-updater.js`):
+
+1. Every 6 h (and when you click the version pill) it asks the GitHub API for
+   the newest commit and compares it with the installed one. The installed
+   version comes from `paste-proxy/build-info.txt`, which GitHub fills in when
+   it builds the ZIP (`export-subst` in `.gitattributes`).
+2. If there is a newer one, it downloads it in the background to
+   `~/.chipagents/web-updater/staging/`, unpacks it and checks it (required
+   files present, right version, `node --check` on every `.js`). A teal
+   **⬆ ChipAgents Web update** pill then appears.
+3. The pill shows what changed. **Later** hides it until a newer commit;
+   **Update now** waits until no conversation is running, then:
+   - backs up every file it will replace or remove to
+     `~/.chipagents/web-updater/backups/` (last 3 kept);
+   - writes the new files (temp file + rename) and removes files that were
+     deleted upstream, but only if you did not edit them;
+   - keeps your data: skills in `skill-catalog/` and your
+     `paste-proxy/skill-catalog.json` are never overwritten;
+   - writes a changed `chipagents-web-paste.bat` as
+     `chipagents-web-paste.bat.new`; the next start swaps it in (a running
+     `.bat` must not be overwritten);
+   - undoes everything if a step fails.
+4. The proxy exits with code 75, `start.sh` starts the new version in the same
+   window, and the open tab reloads itself with the new link (the old link is
+   accepted for 10 min only to hand over the new one).
+
+If `companion-extension/` changed, click **Reload** on the extension card in
+`edge://extensions` / `chrome://extensions`.
+
+A git checkout (a folder with `.git`) is updated with `git pull --ff-only`, but
+only when it is on `main` with no local changes; otherwise the pill only tells
+you to pull. To undo an update, copy the files from the newest backup folder
+back (its `manifest.json` lists them) and restart.
 
 ## Limits
 
