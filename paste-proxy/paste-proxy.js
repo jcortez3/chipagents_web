@@ -10,8 +10,9 @@ const { spawn, execFile } = require('child_process');
 const conversations = require('./conversations');
 const { create: createUpdater, compare: compareVersions } = require('./updater');
 const skills = require('./skills');
+const toolUpdater = require('./tool-updater');
 
-const BUILD = '2026-11-26a';
+const BUILD = '2026-11-27a';
 
 const PASTE_DIR = process.env.PASTE_DIR || path.join(process.cwd(), 'screens');
 const GEN_DIR = process.env.GEN_DIR || path.join(PASTE_DIR, 'generated_images');
@@ -21,6 +22,9 @@ const HUB_START = process.env.HUB_PORT || '4242';
 const CHIPAGENTS = process.env.CHIPAGENTS_BIN || path.join(process.env.HOME || '', '.local/bin/chipagents');
 const OPEN_BROWSER = process.env.PASTE_NO_BROWSER !== '1';
 const updater = createUpdater({ bin: CHIPAGENTS });
+const TOOL_UPDATE = process.env.TOOL_UPDATE !== '0';
+const tool = toolUpdater.create({});
+const EXIT_RESTART = 75;
 const MB = 1024 * 1024;
 const mbEnv = (name, def) => (parseFloat(process.env[name]) > 0 ? parseFloat(process.env[name]) : def) * MB;
 const MAX_BYTES = 25 * MB;
@@ -393,6 +397,9 @@ const server = http.createServer((req, res) => {
   if (p === '/__file') return void handleFile(req, res).catch(fail);
   if (p === '/__paste/version') return void handleVersion(req, res).catch(fail);
   if (p === '/__paste/update') return void handleUpdate(req, res).catch(fail);
+  if (p === '/__paste/tool-version') return void handleToolVersion(req, res).catch(fail);
+  if (p === '/__paste/tool-update') return void handleToolUpdate(req, res).catch(fail);
+  if (p === '/__paste/tool-update/dismiss') return void handleToolDismiss(req, res).catch(fail);
   if (p.startsWith('/__skills/')) return void skillsHttp(req, res, p).catch(fail);
   const run = req.method === 'GET' && /^\/hub\/api\/runs\/([\w-]{8,80})$/.exec(p);
   if (run && sync) sync.touch(run[1]);
@@ -566,6 +573,7 @@ async function handleUpdate(req, res) {
   }
   if (!(await authorized(req))) return sendJson(res, 401, { error: 'unauthorized' });
   if (job && !['done', 'failed'].includes(job.phase)) return sendJson(res, 409, { error: 'an update is already running', job: publicJob() });
+  if (toolInFlight()) return sendJson(res, 409, { error: 'a ChipAgents Web update is running' });
   const info = await versionInfo(true);
   if (info.managed) return sendJson(res, 400, { error: 'shared installation: ask your administrator to update it' });
   if (!info.updateAvailable) return sendJson(res, 400, { error: `already on the newest version (${info.current})` });
@@ -575,6 +583,93 @@ async function handleUpdate(req, res) {
   }
   void runUpdate(info);
   sendJson(res, 202, { job: publicJob() });
+}
+
+let toolJob = null;
+let handoff = null;
+let exitForUpdate = false;
+const toolInFlight = () => !!toolJob && !['done', 'failed'].includes(toolJob.phase);
+
+function publicToolJob() {
+  if (!toolJob) return null;
+  if (toolJob.phase === 'done' && handoff && handoff.until < Date.now()) return null;
+  const { phase, from, to, error, startedAt, companion, bat, url } = toolJob;
+  return { phase, from, to, error, startedAt, companion, bat, ...(phase === 'done' && url ? { url } : {}) };
+}
+
+function handoffValid(req) {
+  const t = requestToken(req);
+  return !!t && !!handoff && handoff.until > Date.now() && handoff.tokens.some((x) => sameSecret(t, x));
+}
+
+async function handleToolVersion(req, res) {
+  if (req.method !== 'GET') return sendJson(res, 405, { error: 'method not allowed' });
+  if (!(await authorized(req))) return sendJson(res, 401, { error: 'unauthorized' });
+  if (!TOOL_UPDATE) return sendJson(res, 200, { disabled: true, job: publicToolJob() });
+  const force = new URL(req.url, 'http://localhost').searchParams.get('refresh') === '1';
+  sendJson(res, 200, { ...(await tool.status(force)), job: publicToolJob() });
+}
+
+async function handleToolDismiss(req, res) {
+  if (req.method !== 'POST' || req.headers['x-chipagents-paste'] !== '1' || !originAllowed(req)) return sendJson(res, 403, { error: 'forbidden' });
+  if (!(await authorized(req))) return sendJson(res, 401, { error: 'unauthorized' });
+  try {
+    await tool.dismiss(new URL(req.url, 'http://localhost').searchParams.get('sha'));
+  } catch (e) {
+    return sendJson(res, 400, { error: e.message });
+  }
+  sendJson(res, 200, { ok: true });
+}
+
+async function handleToolUpdate(req, res) {
+  if (req.method === 'GET') {
+    if (!handoffValid(req) && !oldTokenValid(req) && !(await authorized(req))) return sendJson(res, 401, { error: 'unauthorized' });
+    return sendJson(res, 200, { job: publicToolJob() });
+  }
+  if (req.method !== 'POST' || req.headers['x-chipagents-paste'] !== '1' || !originAllowed(req)) return sendJson(res, 403, { error: 'forbidden' });
+  if (!(await authorized(req))) return sendJson(res, 401, { error: 'unauthorized' });
+  if (!TOOL_UPDATE) return sendJson(res, 400, { error: 'ChipAgents Web updates are turned off (TOOL_UPDATE=0)' });
+  if (toolInFlight()) return sendJson(res, 409, { error: 'a ChipAgents Web update is already running', job: publicToolJob() });
+  if (job && !['done', 'failed'].includes(job.phase)) return sendJson(res, 409, { error: 'a ChipAgents update is running; try again when it is done' });
+  const n = await runningCount();
+  if (n) {
+    return sendJson(res, 409, { error: `${n} conversation${n > 1 ? 's are' : ' is'} still running; update after ${n > 1 ? 'they finish' : 'it finishes'} (or stop ${n > 1 ? 'them' : 'it'})`, running: n });
+  }
+  void runToolUpdate();
+  sendJson(res, 202, { job: publicToolJob() });
+}
+
+async function runToolUpdate() {
+  toolJob = { phase: 'checking', from: '', to: '', error: '', startedAt: Date.now(), companion: false, bat: false, url: '' };
+  const say = (phase) => {
+    toolJob.phase = phase;
+    console.log(`[tool-update] ${phase}`);
+  };
+  try {
+    const r = await tool.apply(say);
+    Object.assign(toolJob, { from: r.from, to: r.to, companion: r.companion, bat: r.bat });
+    console.log(`[tool-update] ${(r.from || 'unknown').slice(0, 7)} -> ${r.to.slice(0, 7)}: ${r.changed} files changed, ${r.deleted} removed` +
+      (r.kept.length ? `, kept your copy of ${r.kept.join(', ')}` : ''));
+    say('restarting');
+    const tokens = [launchToken, ...oldTokens.keys()].filter(Boolean);
+    await tool.writeHandoff({ tokens, from: r.from, to: r.to, companion: r.companion, bat: r.bat, startedAt: toolJob.startedAt });
+    setTimeout(shutdownForUpdate, 500);
+  } catch (e) {
+    toolJob.error = e.message;
+    say('failed');
+    console.warn(`[tool-update] ${e.message}`);
+  }
+}
+
+function shutdownForUpdate() {
+  exitForUpdate = true;
+  restarting = false;
+  if (!child || child.exitCode !== null || child.signalCode) process.exit(EXIT_RESTART);
+  child.kill('SIGTERM');
+  setTimeout(() => {
+    child.kill('SIGKILL');
+    process.exit(EXIT_RESTART);
+  }, 20000).unref();
 }
 
 function startHub() {
@@ -601,6 +696,11 @@ function startHub() {
         console.log(`  (upstream chipagents web ${hubVersion || ''} on port ${upstreamPort})`);
         if (firstStart) openBrowser(url);
         firstStart = false;
+        if (toolJob && toolJob.phase === 'restarting' && handoff) {
+          toolJob.phase = 'done';
+          toolJob.url = m[3];
+          console.log(`[tool-update] now running ChipAgents Web ${toolJob.to.slice(0, 7)}`);
+        }
         if (CONV_SYNC && !sync) {
           try {
             sync = conversations.start({
@@ -630,7 +730,7 @@ function startHub() {
       return;
     }
     server.close();
-    process.exit(code ?? 0);
+    process.exit(exitForUpdate ? EXIT_RESTART : (code ?? 0));
   });
 }
 
@@ -639,6 +739,15 @@ function startHub() {
   console.log(`[paste] build ${BUILD}`);
   console.log(`[paste] proxy listening on 127.0.0.1:${proxyPort}, pasted -> ${PASTE_DIR}, generated -> ${GEN_DIR}`);
   if (!CONV_SYNC) console.log('[conversations] sync turned off (CONV_SYNC=0)');
+  if (TOOL_UPDATE) {
+    handoff = await tool.takeHandoff();
+    if (handoff) {
+      firstStart = false;
+      toolJob = { phase: 'restarting', from: handoff.from, to: handoff.to, error: '', startedAt: handoff.startedAt || Date.now(),
+        companion: !!handoff.companion, bat: !!handoff.bat, url: '' };
+    }
+    tool.startTimer((msg) => console.log(`[tool-update] ${msg}`));
+  }
   startHub();
   const stop = () => {
     restarting = false;
